@@ -1,0 +1,65 @@
+# Configuration RPA pour Atlanta Sanad
+# Version: 1.0.0
+# Dernière mise à jour: 2025-11-09
+
+insurer_name: "Atlanta Sanad"
+base_url: "https://www.atlantasanad.ma"
+simulator_path: "/devis-auto-0"
+country: "MA"
+complexity: 2
+rating: 4.0
+
+# Configuration avancée
+requires_cookies: false
+has_captcha: false
+wait_after_load: 3000
+max_retries: 3
+screenshot_on_error: true
+
+# Workflows par produit
+workflows:
+  # Assurance Auto
+  auto:
+    steps:
+      - action: navigate
+        url: "{{base_url}}{{simulator_path}}"
+        timeout: 30000
+
+      - action: wait_for
+        selector: "form"
+        timeout: 10000
+
+      - action: fill_form
+        selectors:
+          vehicle_brand: "[name='brand'], #brand, input[placeholder*='Marque']"
+          vehicle_model: "[name='model'], #model, input[placeholder*='Modèle']"
+          horse_power: "[name='horsePower'], [name='puissance'], #horsePower"
+          circulation_date: "[name='circulationDate'], [name='dateMiseCirculation']"
+          vehicle_value: "[name='vehicleValue'], [name='valeur'], #valeur"
+          fuel_type: "[name='fuelType'], [name='combustion'], select#fuelType"
+          last_name: "[name='lastName'], [name='nom'], #nom"
+          first_name: "[name='firstName'], [name='prenom'], #prenom"
+          date_of_birth: "[name='dateOfBirth'], [name='dateNaissance']"
+          city: "[name='city'], [name='ville'], #city"
+          nationality: "[name='nationality'], [name='nationalite'], select#nationality"
+
+      - action: click
+        selector: "button[type='submit'], input[type='submit'], .btn-submit, #submit"
+        wait_after: 5000
+
+      - action: wait_for
+        selector: ".tarif, .price, .result, [class*='devis'], [class*='tarif']"
+        timeout: 15000
+
+      - action: extract_result
+        selectors:
+          price_monthly: "[class*='prix'], [class*='price'], .tarif-mensuel"
+          price_yearly: "[class*='annuel'], .tarif-annuel"
+          quote_reference: "[class*='reference'], .ref-devis"
+          coverage_details: "[class*='garantie'], .coverage-item"
+
+# Sélecteurs de validation
+validation_selectors:
+  error_message: ".error, .alert-danger, [class*='error']"
+  success_message: ".success, .alert-success"
+  loading: ".loading, .spinner, [class*='loading']"

@@ -1,0 +1,668 @@
+"""
+RPA BaseInsurer - Classe de base abstraite pour tous les scrapers d'assureurs
+Version: 1.1.0
+"""
+
+import asyncio
+import logging
+from abc import ABC, abstractmethod
+from typing import Dict, Any, Optional
+from datetime import datetime
+from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
+
+from ..models import InsurerConfig, QuoteFormData, QuoteResult
+from ..exceptions import (
+    WorkflowExecutionError,
+    FormFillingError,
+    ExtractionError,
+    SelectorNotFoundError,
+    TimeoutError as RPATimeoutError,
+    NavigationError,
+    CaptchaDetectedError
+)
+
+logger = logging.getLogger(__name__)
+
+
+class BaseInsurer(ABC):
+    """
+    Classe abstraite pour les scrapers d'assureurs
+
+    Fournit les méthodes communes et définit l'interface que tous les
+    scrapers spécifiques doivent implémenter.
+    """
+
+    def __init__(self, config: InsurerConfig):
+        self.config = config
+        self.name = config.insurer_name
+        self.base_url = config.base_url
+        self.screenshots = []  # Pour debug
+
+        logger.info(f"Initialized {self.__class__.__name__} for {self.name}")
+
+    @abstractmethod
+    async def scrape_quote(
+        self,
+        page: Page,
+        product_code: str,
+        form_data: QuoteFormData
+    ) -> QuoteResult:
+        """
+        Méthode abstraite à implémenter par chaque scraper
+
+        Args:
+            page: Page Playwright
+            product_code: Code du produit (auto, moto, etc.)
+            form_data: Données du formulaire
+
+        Returns:
+            Résultat du scraping (prix, garanties, etc.)
+        """
+        pass
+
+    async def execute_workflow(
+        self,
+        page: Page,
+        workflow: Dict,
+        form_data: QuoteFormData
+    ) -> QuoteResult:
+        """
+        Exécute un workflow YAML générique
+
+        Cette méthode peut être utilisée par les scrapers qui suivent
+        exactement le workflow YAML, ou être surchargée pour une logique custom.
+        """
+        logger.info(f"[{self.name}] Executing workflow with {len(workflow.get('steps', []))} steps")
+
+        extracted_data = {}
+
+        try:
+            for idx, step in enumerate(workflow.get('steps', [])):
+                action = step.get('action')
+                logger.debug(f"[{self.name}] Step {idx+1}: {action}")
+
+                if action == 'navigate':
+                    await self._step_navigate(page, step)
+
+                elif action == 'wait':
+                    await self._step_wait(page, step)
+
+                elif action == 'wait_for':
+                    await self._step_wait_for(page, step)
+
+                elif action == 'fill_form':
+                    await self._step_fill_form(page, step, form_data)
+
+                elif action == 'type':
+                    await self._step_type(page, step, form_data)
+
+                elif action == 'click':
+                    await self._step_click(page, step)
+
+                elif action == 'select':
+                    await self._step_select(page, step, form_data)
+
+                elif action == 'extract':
+                    extracted_data = await self._step_extract(page, step)
+
+                elif action == 'screenshot':
+                    await self._step_screenshot(page, step)
+
+                elif action == 'scroll':
+                    await self._step_scroll(page, step)
+
+                elif action == 'execute_js':
+                    await self._step_execute_js(page, step, form_data)
+
+                elif action == 'accept_cookies':
+                    await self._step_accept_cookies(page, step)
+
+                else:
+                    logger.warning(f"[{self.name}] Unknown action: {action}")
+
+            # Construire le résultat
+            if not extracted_data:
+                raise ExtractionError("No data extracted from workflow", insurer=self.name)
+
+            return self._build_quote_result(extracted_data)
+
+        except PlaywrightTimeoutError as e:
+            logger.error(f"[{self.name}] Playwright timeout: {e}")
+            raise RPATimeoutError(f"Timeout during workflow execution: {e}", insurer=self.name)
+
+        except Exception as e:
+            logger.error(f"[{self.name}] Workflow execution failed: {e}")
+            raise WorkflowExecutionError(f"Workflow failed: {e}", insurer=self.name)
+
+    async def _step_navigate(self, page: Page, step: Dict):
+        """Step: Navigation vers une URL"""
+        url = step.get('url', '')
+
+        # Remplacer les variables
+        url = url.replace('{{base_url}}', self.base_url)
+        url = url.replace('{{simulator_path}}', self.config.simulator_path or '')
+
+        logger.info(f"[{self.name}] Navigating to: {url}")
+
+        try:
+            timeout = step.get('timeout', 30000)
+            await page.goto(url, wait_until='domcontentloaded', timeout=timeout)
+
+            # Attente après chargement (si configuré)
+            if self.config.wait_after_load > 0:
+                await asyncio.sleep(self.config.wait_after_load / 1000)
+
+        except Exception as e:
+            raise NavigationError(f"Failed to navigate to {url}: {e}", insurer=self.name)
+
+    async def _step_wait(self, page: Page, step: Dict):
+        """Step: Attendre un délai fixe"""
+        duration = step.get('duration', 1000)  # ms
+        logger.debug(f"[{self.name}] Waiting {duration}ms")
+        await asyncio.sleep(duration / 1000)
+
+    async def _step_wait_for(self, page: Page, step: Dict):
+        """Step: Attendre qu'un sélecteur soit présent"""
+        selector = step.get('selector')
+        if not selector:
+            raise WorkflowExecutionError("Missing 'selector' in wait_for step", insurer=self.name)
+
+        timeout = step.get('timeout', 10000)
+
+        try:
+            logger.debug(f"[{self.name}] Waiting for selector: {selector}")
+            await page.wait_for_selector(selector, timeout=timeout)
+        except PlaywrightTimeoutError:
+            raise SelectorNotFoundError(selector, insurer=self.name)
+
+    async def _step_fill_form(self, page: Page, step: Dict, form_data: QuoteFormData):
+        """Step: Remplir un formulaire"""
+        selectors = step.get('selectors', {})
+
+        for field, selector in selectors.items():
+            value = getattr(form_data, field, None)
+
+            if value is None:
+                logger.warning(f"[{self.name}] Field '{field}' not provided in form_data")
+                continue
+
+            try:
+                logger.debug(f"[{self.name}] Filling {field} = {value}")
+                await page.fill(selector, str(value))
+                await asyncio.sleep(0.5)  # Délai entre champs
+
+            except Exception as e:
+                raise FormFillingError(
+                    f"Failed to fill field '{field}' (selector: {selector}): {e}",
+                    insurer=self.name
+                )
+
+    async def _step_type(self, page: Page, step: Dict, form_data: QuoteFormData):
+        """Step: Taper dans un champ (simule vraie saisie clavier)"""
+        selector = step.get('selector')
+        text = step.get('text', '')
+        delay = step.get('delay', 100)  # Délai entre chaque caractère en ms
+        timeout = step.get('timeout', 10000)
+        wait_after = step.get('wait_after', 500)
+
+        if not selector:
+            raise WorkflowExecutionError("Missing 'selector' in type step", insurer=self.name)
+
+        # Remplacer TOUS les placeholders {{xxx}} dynamiquement
+        if '{{' in text:
+            # Convertir form_data en dict
+            if hasattr(form_data, 'dict'):
+                form_dict = form_data.dict()
+            elif hasattr(form_data, '__dict__'):
+                form_dict = vars(form_data)
+            else:
+                form_dict = dict(form_data) if form_data else {}
+
+            # Aplatir les champs imbriqués (ex: _auth.login)
+            flat_dict = {}
+            for key, value in form_dict.items():
+                if isinstance(value, dict):
+                    for sub_key, sub_value in value.items():
+                        flat_dict[f"{key}.{sub_key}"] = sub_value
+                if value is not None:
+                    flat_dict[key] = value
+
+            # Remplacer tous les placeholders
+            import re as regex
+            def replace_match(match):
+                placeholder = match.group(1)
+                value = flat_dict.get(placeholder, '')
+                return str(value) if value else ''
+
+            text = regex.sub(r'\{\{([\w.]+)\}\}', replace_match, text)
+            logger.debug(f"[{self.name}] Replaced placeholders, result: {text[:50]}...")
+
+        try:
+            logger.debug(f"[{self.name}] Typing in {selector}: {text}")
+
+            # Attendre que l'élément soit visible
+            await page.wait_for_selector(selector, state='visible', timeout=timeout)
+
+            # Cliquer sur l'élément pour le focus
+            await page.click(selector)
+            await asyncio.sleep(0.2)
+
+            # Taper caractère par caractère
+            await page.type(selector, text, delay=delay)
+
+            # Attendre après la saisie
+            await asyncio.sleep(wait_after / 1000)
+
+        except PlaywrightTimeoutError:
+            logger.error(f"[{self.name}] Timeout waiting for selector: {selector}")
+            raise SelectorNotFoundError(selector, insurer=self.name)
+        except Exception as e:
+            logger.error(f"[{self.name}] Failed to type in {selector}: {e}")
+            raise FormFillingError(f"Failed to type in {selector}: {e}", insurer=self.name)
+
+    async def _step_click(self, page: Page, step: Dict):
+        """Step: Cliquer sur un élément (version robuste)"""
+        selector = step.get('selector')
+        if not selector:
+            raise WorkflowExecutionError("Missing 'selector' in click step", insurer=self.name)
+
+        timeout = step.get('timeout', 15000)
+        force = step.get('force', False)
+        wait_after = step.get('wait_after', 1000)
+
+        try:
+            logger.debug(f"[{self.name}] Clicking: {selector} (timeout={timeout}, force={force})")
+
+            # Attendre que l'élément soit visible
+            await page.wait_for_selector(selector, state='visible', timeout=timeout)
+
+            # Scroller vers l'élément si nécessaire
+            element = page.locator(selector).first
+            await element.scroll_into_view_if_needed()
+
+            # Cliquer
+            if force:
+                await element.click(force=True)
+            else:
+                await element.click()
+
+            # Attendre après clic
+            await asyncio.sleep(wait_after / 1000)
+
+        except PlaywrightTimeoutError:
+            logger.error(f"[{self.name}] Timeout waiting for selector: {selector}")
+            raise SelectorNotFoundError(selector, insurer=self.name)
+        except Exception as e:
+            logger.error(f"[{self.name}] Failed to click {selector}: {e}")
+            raise WorkflowExecutionError(f"Failed to click {selector}: {e}", insurer=self.name)
+
+    async def _step_select(self, page: Page, step: Dict, form_data: QuoteFormData):
+        """Step: Sélectionner une option dans un select"""
+        selector = step.get('selector')
+        field = step.get('field')
+
+        if not selector or not field:
+            raise WorkflowExecutionError("Missing 'selector' or 'field' in select step", insurer=self.name)
+
+        value = getattr(form_data, field, None)
+        if value is None:
+            logger.warning(f"[{self.name}] Field '{field}' not provided for select")
+            return
+
+        try:
+            logger.debug(f"[{self.name}] Selecting {field} = {value}")
+            await page.select_option(selector, str(value))
+
+        except Exception as e:
+            raise FormFillingError(f"Failed to select {field}: {e}", insurer=self.name)
+
+    async def _step_extract(self, page: Page, step: Dict) -> Dict[str, Any]:
+        """
+        Step: Extraire des données de la page
+        Supporte:
+        - Sélecteurs CSS classiques (ex: "#price", ".garantie")
+        - Sélecteurs JavaScript (ex: "js:window.__data.price")
+        - Fallback automatique pour window.__extractedData
+        """
+        fields = step.get('fields', {})
+        extracted = {}
+
+        for field_name, selector in fields.items():
+            try:
+                if selector.startswith('js:'):
+                    # Extraction JavaScript
+                    js_expr = selector[3:]  # Enlever "js:"
+                    result = await page.evaluate(js_expr)
+                    extracted[field_name] = result
+                    logger.debug(f"[{self.name}] Extracted (JS) {field_name} = {result}")
+                else:
+                    # Extraction CSS classique (comportement original)
+                    await page.wait_for_selector(selector, timeout=5000, state='visible')
+                    element = await page.query_selector(selector)
+                    if element:
+                        text = await element.text_content()
+                        extracted[field_name] = text.strip() if text else None
+                        logger.debug(f"[{self.name}] Extracted {field_name} = {extracted[field_name]}")
+                    else:
+                        logger.warning(f"[{self.name}] Element not found: {selector}")
+                        extracted[field_name] = None
+            except Exception as e:
+                logger.error(f"[{self.name}] Failed to extract {field_name}: {e}")
+                extracted[field_name] = None
+
+        # Fallback: récupérer window.__extractedData si présent
+        try:
+            js_data = await page.evaluate('''() => {
+                if (window.__extractedData) return window.__extractedData;
+                if (window.__zephirExtracted) return window.__zephirExtracted;
+                return null;
+            }''')
+            if js_data:
+                logger.info(f"[{self.name}] Found JS extracted data: {list(js_data.keys()) if isinstance(js_data, dict) else 'raw'}")
+                # Merger avec extracted, JS a priorité si quote_reference présent
+                if isinstance(js_data, dict):
+                    # Construire quote_reference depuis formules si présent
+                    if 'formules' in js_data and js_data['formules']:
+                        parts = []
+                        for f in js_data['formules']:
+                            name = f.get('name', 'UNKNOWN')
+                            pm = f.get('price_monthly', 0)
+                            py = f.get('price_yearly', pm * 12)
+                            parts.append(f"{name}:{pm:.2f}EUR/mois,{py:.2f}EUR/an")
+                        extracted['reference'] = '|'.join(parts)
+                        # Premier prix comme price_monthly pour compatibilité
+                        if js_data['formules']:
+                            extracted['price_monthly'] = str(js_data['formules'][0].get('price_monthly', ''))
+                    # Merger les autres champs
+                    for k, v in js_data.items():
+                        if k not in extracted or extracted[k] is None:
+                            extracted[k] = v
+        except Exception as e:
+            logger.debug(f"[{self.name}] No JS data found: {e}")
+
+        return extracted
+
+    async def _step_screenshot(self, page: Page, step: Dict):
+        """Step: Prendre un screenshot"""
+        if not self.config.screenshot_on_error and not step.get('force', False):
+            return
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"screenshot_{self.name}_{timestamp}.png"
+
+        try:
+            await page.screenshot(path=filename)
+            self.screenshots.append(filename)
+            logger.info(f"[{self.name}] Screenshot saved: {filename}")
+        except Exception as e:
+            logger.error(f"[{self.name}] Failed to take screenshot: {e}")
+
+    async def _step_scroll(self, page: Page, step: Dict):
+        """Step: Scroller la page"""
+        direction = step.get('direction', 'down')
+        amount = step.get('amount', 500)
+
+        try:
+            if direction == 'down':
+                await page.evaluate(f"window.scrollBy(0, {amount})")
+            elif direction == 'up':
+                await page.evaluate(f"window.scrollBy(0, -{amount})")
+
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.warning(f"[{self.name}] Scroll failed: {e}")
+
+    async def _step_execute_js(self, page: Page, step: Dict, form_data: QuoteFormData = None):
+        """Step: Exécuter du JavaScript personnalisé avec support des placeholders"""
+        script = step.get('script')
+        if not script:
+            logger.warning(f"[{self.name}] execute_js step without 'script' field")
+            return
+
+        # === REMPLACEMENT DES PLACEHOLDERS {{xxx}} ===
+        if form_data and '{{' in script:
+            # Convertir form_data en dict
+            if hasattr(form_data, 'dict'):
+                form_dict = form_data.dict()
+            elif hasattr(form_data, '__dict__'):
+                form_dict = vars(form_data)
+            else:
+                form_dict = dict(form_data) if form_data else {}
+
+            # Aplatir les champs imbriqués (ex: _auth.login)
+            flat_dict = {}
+            for key, value in form_dict.items():
+                if isinstance(value, dict):
+                    for sub_key, sub_value in value.items():
+                        flat_dict[f"{key}.{sub_key}"] = sub_value
+                if value is not None:
+                    flat_dict[key] = value
+
+            # Remplacer tous les placeholders
+            import re as regex
+            def replace_match(match):
+                placeholder = match.group(1)
+                value = flat_dict.get(placeholder, '')
+                return str(value) if value else ''
+
+            script = regex.sub(r'\{\{([\w.]+)\}\}', replace_match, script)
+            logger.info(f"[{self.name}] JS placeholders replaced")
+
+        try:
+            logger.debug(f"[{self.name}] Executing JS: {script[:100]}...")
+            await page.evaluate(script)
+
+            wait_after = step.get('wait_after', 500)
+            await asyncio.sleep(wait_after / 1000)
+
+        except Exception as e:
+            logger.error(f"[{self.name}] Failed to execute JS: {e}")
+            raise WorkflowExecutionError(f"JS execution failed: {e}", insurer=self.name)
+
+    async def _step_accept_cookies(self, page: Page, step: Dict):
+        """Step: Accepter les cookies (multi-stratégie)"""
+        provider = step.get('provider', 'generic')
+        timeout = step.get('timeout', 5000)
+
+        logger.info(f"[{self.name}] Attempting to accept cookies (provider: {provider})")
+
+        try:
+            if provider.lower() == 'didomi':
+                # Stratégie 1: Chercher dans une iframe
+                try:
+                    frames = page.frames
+                    for frame in frames:
+                        if 'didomi' in frame.url.lower():
+                            logger.debug(f"[{self.name}] Found Didomi iframe")
+                            # Chercher les boutons d'acceptation
+                            accept_selectors = [
+                                "button:has-text('Accepter & Fermer')",
+                                "button:has-text('Accepter')",
+                                "button:has-text('Tout accepter')",
+                                "button[id*='accept']",
+                                "button[class*='accept']"
+                            ]
+                            for selector in accept_selectors:
+                                try:
+                                    await frame.click(selector, timeout=2000)
+                                    logger.info(f"[{self.name}] Cookie consent accepted via iframe: {selector}")
+                                    await asyncio.sleep(1)
+                                    return
+                                except:
+                                    continue
+                except Exception as e:
+                    logger.debug(f"[{self.name}] Iframe strategy failed: {e}")
+
+                # Stratégie 2: Chercher dans la page principale
+                accept_selectors = [
+                    "button:has-text('Accepter & Fermer')",
+                    "button:has-text('Accepter')",
+                    "button:has-text('Tout accepter')",
+                    "#didomi-notice-agree-button",
+                    "button[id*='accept']",
+                    "button[class*='accept']"
+                ]
+
+                for selector in accept_selectors:
+                    try:
+                        await page.click(selector, timeout=2000)
+                        logger.info(f"[{self.name}] Cookie consent accepted: {selector}")
+                        await asyncio.sleep(1)
+                        return
+                    except:
+                        continue
+
+                # Stratégie 3: Forcer la suppression via JavaScript
+                logger.debug(f"[{self.name}] Trying JS removal of Didomi overlay")
+                await page.evaluate("""
+                    // Supprimer les overlays Didomi
+                    const overlays = document.querySelectorAll('[id*="didomi"], [class*="didomi"]');
+                    overlays.forEach(el => el.remove());
+
+                    // Remettre le scroll
+                    document.body.style.overflow = 'auto';
+                    document.documentElement.style.overflow = 'auto';
+                """)
+                await asyncio.sleep(1)
+                logger.info(f"[{self.name}] Didomi overlay forcefully removed")
+
+            else:
+                # Stratégie générique
+                generic_selectors = [
+                    "button:has-text('Accept')",
+                    "button:has-text('Accepter')",
+                    "button:has-text('J\\'accepte')",
+                    "button[id*='accept']",
+                    "button[class*='accept']",
+                    ".cookie-accept",
+                    "#cookie-accept"
+                ]
+
+                for selector in generic_selectors:
+                    try:
+                        await page.click(selector, timeout=2000)
+                        logger.info(f"[{self.name}] Cookie consent accepted: {selector}")
+                        await asyncio.sleep(1)
+                        return
+                    except:
+                        continue
+
+                logger.warning(f"[{self.name}] Could not find cookie consent button")
+
+        except Exception as e:
+            logger.warning(f"[{self.name}] Cookie acceptance failed: {e}")
+
+    def _build_quote_result(self, extracted_data: Dict[str, Any]) -> QuoteResult:
+        """
+        Construit un QuoteResult depuis les données extraites
+
+        Les scrapers spécifiques peuvent surcharger cette méthode pour
+        une logique de transformation plus complexe.
+        """
+        # Nettoyer et convertir les prix
+        price_monthly = self._parse_price(extracted_data.get('price_monthly'))
+        price_yearly = self._parse_price(extracted_data.get('price_yearly'))
+
+        return QuoteResult(
+            price_monthly=price_monthly,
+            price_yearly=price_yearly,
+            currency=extracted_data.get('currency') or 'EUR',  # ← FALLBACK
+            quote_reference=extracted_data.get('reference'),
+            guarantees=extracted_data.get('guarantees') or None,
+            coverage_details=extracted_data.get('coverage') or {},  # ← FALLBACK
+            deductible=self._parse_price(extracted_data.get('deductible')),
+            valid_until=extracted_data.get('valid_until'),
+            insurer_name=self.name
+        )
+
+    def _parse_price(self, price_str: Optional[str]) -> Optional[float]:
+        """
+        Parse une string de prix en float
+
+        Exemples:
+            "1 234,56 MAD" -> 1234.56
+            "1.234,56€" -> 1234.56
+            "€1,234.56" -> 1234.56
+        """
+        if not price_str:
+            return None
+
+        try:
+            # Supprimer symboles monétaires et espaces
+            cleaned = price_str.replace('MAD', '').replace('€', '').replace('$', '').strip()
+
+            # Gérer les formats français (1 234,56) et anglo-saxons (1,234.56)
+            if ',' in cleaned and '.' in cleaned:
+                # Format mixte: déterminer lequel est le séparateur décimal
+                if cleaned.rindex(',') > cleaned.rindex('.'):
+                    # Virgule est le séparateur décimal (format FR)
+                    cleaned = cleaned.replace('.', '').replace(',', '.')
+                else:
+                    # Point est le séparateur décimal (format US)
+                    cleaned = cleaned.replace(',', '')
+            elif ',' in cleaned:
+                # Seulement virgule: probablement format français
+                cleaned = cleaned.replace(' ', '').replace(',', '.')
+            else:
+                # Seulement point ou aucun séparateur
+                cleaned = cleaned.replace(' ', '')
+
+            return float(cleaned)
+
+        except Exception as e:
+            logger.error(f"Failed to parse price '{price_str}': {e}")
+            return None
+
+    async def handle_errors(self, error: Exception, page: Page) -> None:
+        """
+        Gestion centralisée des erreurs
+
+        Prend des screenshots et détecte les CAPTCHAs
+        """
+        logger.error(f"[{self.name}] Error occurred: {error}")
+
+        # Détecter CAPTCHA
+        if await self.detect_captcha(page):
+            raise CaptchaDetectedError(
+                f"CAPTCHA detected on {self.name}",
+                insurer=self.name
+            )
+
+        # Prendre screenshot si configuré
+        if self.config.screenshot_on_error:
+            try:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"error_{self.name}_{timestamp}.png"
+                await page.screenshot(path=filename)
+                self.screenshots.append(filename)
+                logger.info(f"[{self.name}] Error screenshot saved: {filename}")
+            except Exception as e:
+                logger.error(f"[{self.name}] Failed to take error screenshot: {e}")
+
+    async def detect_captcha(self, page: Page) -> bool:
+        """
+        Détecte la présence d'un CAPTCHA sur la page
+
+        Peut être surchargé par les scrapers spécifiques pour une
+        détection plus fine.
+        """
+        # Patterns communs de CAPTCHA
+        captcha_patterns = [
+            'recaptcha',
+            'captcha',
+            'g-recaptcha',
+            'h-captcha',
+            'cloudflare'
+        ]
+
+        # Checker le contenu HTML
+        try:
+            html = await page.content()
+            for pattern in captcha_patterns:
+                if pattern.lower() in html.lower():
+                    logger.warning(f"[{self.name}] CAPTCHA detected: {pattern}")
+                    return True
+        except:
+            pass
+
+        return False

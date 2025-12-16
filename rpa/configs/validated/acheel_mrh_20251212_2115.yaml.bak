@@ -1,0 +1,228 @@
+# =============================================================================
+# ACHEEL MRH - Workflow validé le 2025-12-12
+# =============================================================================
+insurer_name: "Acheel"
+base_url: "https://www.acheel.com"
+country: "FR"
+complexity: 4
+rating: 4.0
+
+browser:
+  headless: true
+  timeout: 90000
+  viewport:
+    width: 1280
+    height: 800
+
+retry:
+  max_retries: 1
+  retry_delay: 1500
+
+workflows:
+  habitation:
+    name: "Devis Assurance Habitation"
+    product_code: "mrh"
+    
+    steps:
+      - action: navigate
+        url: "https://www.acheel.com/subscribe/mrh"
+        wait_after: 3000
+
+      - action: accept_cookies
+        provider: "didomi"
+        timeout: 5000
+        wait_after: 1000
+
+      - action: execute_js
+        script: |
+          (async () => {
+            const ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            let input = document.querySelector('input');
+            for (let i = 0; i < 30 && (!input || !input.offsetWidth); i++) {
+              await new Promise(r => setTimeout(r, 200));
+              input = document.querySelector('input');
+            }
+            input.focus();
+            ns.call(input, '15 Rue de Rivoli Paris');
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            await new Promise(r => setTimeout(r, 2000));
+            input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', keyCode: 40, bubbles: true }));
+            await new Promise(r => setTimeout(r, 300));
+            input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+          })();
+        wait_after: 2000
+
+      - action: click
+        selector: "button >> text=CONTINUE"
+        timeout: 10000
+        wait_after: 2500
+
+      - action: click
+        selector: "button >> text=CONTINUE"
+        timeout: 10000
+        wait_after: 2500
+
+      - action: click
+        selector: "text=Un Appartement"
+        timeout: 15000
+        wait_after: 2000
+
+      - action: click
+        selector: "button >> text=CONTINUE"
+        timeout: 10000
+        wait_after: 2500
+
+      - action: click
+        selector: "text=Principale"
+        timeout: 10000
+        wait_after: 2500
+
+      - action: click
+        selector: "text=Locataire"
+        timeout: 10000
+        wait_after: 2500
+
+      - action: click
+        selector: "text=Intermédiaire"
+        timeout: 10000
+        wait_after: 1500
+
+      - action: execute_js
+        script: |
+          (async () => {
+            const ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            const inputs = Array.from(document.querySelectorAll('input')).filter(i => i.offsetWidth > 0 && !['hidden','checkbox','radio'].includes(i.type));
+            if (inputs[0]) { 
+              inputs[0].focus(); 
+              ns.call(inputs[0], '65'); 
+              inputs[0].dispatchEvent(new Event('input', {bubbles:true})); 
+              inputs[0].dispatchEvent(new Event('change', {bubbles:true})); 
+            }
+            window.scrollBy(0, 300);
+          })();
+        wait_after: 1000
+
+      - action: click
+        selector: "text=+"
+        timeout: 10000
+        wait_after: 500
+
+      - action: click
+        selector: "text=+"
+        timeout: 10000
+        wait_after: 1000
+
+      - action: click
+        selector: "button >> text=CONTINUE"
+        timeout: 10000
+        wait_after: 2500
+
+      - action: click
+        selector: "text=/^Non$/"
+        timeout: 10000
+        wait_after: 2500
+
+      - action: click
+        selector: "text=/^Non$/"
+        timeout: 10000
+        wait_after: 2500
+
+      - action: click
+        selector: "text=Aucun"
+        timeout: 10000
+        wait_after: 2500
+
+      - action: click
+        selector: "text=pas besoin"
+        timeout: 10000
+        wait_after: 2000
+
+      - action: execute_js
+        script: "window.scrollBy(0, 400);"
+        wait_after: 1000
+
+      - action: click
+        selector: "button >> text=CONTINUE"
+        timeout: 10000
+        wait_after: 2500
+
+      - action: execute_js
+        script: |
+          (async () => {
+            const ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            await new Promise(r => setTimeout(r, 1000));
+            const inputs = Array.from(document.querySelectorAll('input'))
+              .filter(i => i.offsetWidth > 0 && i.offsetHeight > 0 && !['hidden','checkbox','radio'].includes(i.type));
+            const values = ['Jean', 'Dupont', 'test.rpa@example.com', '0612345678'];
+            for (let i = 0; i < Math.min(inputs.length, values.length); i++) {
+              inputs[i].focus();
+              ns.call(inputs[i], values[i]);
+              inputs[i].dispatchEvent(new Event('input', { bubbles: true }));
+              inputs[i].dispatchEvent(new Event('change', { bubbles: true }));
+              await new Promise(r => setTimeout(r, 200));
+            }
+          })();
+        wait_after: 1500
+
+      - action: click
+        selector: "div.mt-6 > div > div:nth-of-type(2) button"
+        timeout: 10000
+        wait_after: 1000
+
+      - action: click
+        selector: "div.mt-12 > button"
+        timeout: 15000
+        wait_after: 5000
+
+      - action: screenshot
+        force: true
+
+      # Injecter les données formatées correctement
+      - action: execute_js
+        script: |
+          (function() {
+            const bodyText = document.body.innerText;
+            
+            // Extraire prix Standard
+            const stdMatch = bodyText.match(/Standard[\s\S]*?(\d+,\d+)\s*€\s*\/\s*mois[\s\S]*?soit\s*(\d+,\d+)\s*€/i);
+            const stdMonthly = stdMatch ? stdMatch[1].replace(',', '.') : '0';
+            const stdYearly = stdMatch ? stdMatch[2].replace(',', '.') : '0';
+            
+            // Extraire prix Premium  
+            const premMatch = bodyText.match(/Premium[\s\S]*?(\d+,\d+)\s*€\s*\/\s*mois[\s\S]*?soit\s*(\d+,\d+)\s*€/i);
+            const premMonthly = premMatch ? premMatch[1].replace(',', '.') : '0';
+            const premYearly = premMatch ? premMatch[2].replace(',', '.') : '0';
+            
+            // Créer conteneur visible
+            const dataDiv = document.createElement('div');
+            dataDiv.id = 'rpa-data';
+            dataDiv.style.cssText = 'position:fixed;top:0;left:0;z-index:99999;background:white;padding:10px;font-size:12px;';
+            
+            // Garanties sous forme de texte (sera splitté par le backend si besoin)
+            const standardGuarantees = "Responsabilité Civile|Incendie et Risques Annexes|Catastrophe Naturelle et Technologique|Dégâts des Eaux|Protection Juridique|Défense Pénale et Recours|Événements climatiques|Assistance";
+            const premiumGuarantees = "Vol et Vandalisme|Bris de Glace|Assistance Premium|Protection Juridique Étendue";
+            
+            dataDiv.innerHTML = `
+              <div id="rpa-price-monthly">${stdMonthly}</div>
+              <div id="rpa-price-yearly">${stdYearly}</div>
+              <div id="rpa-currency">EUR</div>
+              <div id="rpa-guarantees">${standardGuarantees}</div>
+              <div id="rpa-reference">STANDARD:${stdMonthly}EUR/mois,${stdYearly}EUR/an|PREMIUM:${premMonthly}EUR/mois,${premYearly}EUR/an</div>
+              <div id="rpa-valid-until">Standard:${standardGuarantees}||Premium(+):${premiumGuarantees}</div>
+            `;
+            
+            document.body.appendChild(dataDiv);
+            return 'OK';
+          })();
+        wait_after: 500
+
+      # Extraction avec les clés attendues
+      - action: extract
+        fields:
+          price_monthly: "#rpa-price-monthly"
+          price_yearly: "#rpa-price-yearly"
+          currency: "#rpa-currency"
+          guarantees: "#rpa-guarantees"
+          reference: "#rpa-reference"
+          valid_until: "#rpa-valid-until"
+        wait_after: 1000

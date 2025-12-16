@@ -1,0 +1,152 @@
+# Configuration RPA pour Allianz Maroc
+# Version: 1.0.0
+# Dernière mise à jour: 2025-01-06
+
+insurer_name: "Allianz Maroc"
+base_url: "https://www.allianz.ma"
+simulator_path: "/particuliers/simulation-assurance"
+country: "MA"
+complexity: 3
+rating: 4.6
+
+# Configuration avancée
+requires_cookies: false
+has_captcha: false
+wait_after_load: 2000
+max_retries: 3
+screenshot_on_error: true
+
+# Workflows par produit
+workflows:
+  # Assurance Auto
+  auto:
+    steps:
+      - action: navigate
+        url: "{{base_url}}{{simulator_path}}/auto"
+        timeout: 30000
+      
+      - action: wait_for
+        selector: "#usage"
+        timeout: 10000
+      
+      - action: select
+        selector: "#usage"
+        field: usage
+      
+      - action: fill_form
+        selectors:
+          vehicle_brand: "#brand"
+          vehicle_model: "#model"
+          driver_age: "#age"
+          driver_license_years: "#license_years"
+      
+      - action: click
+        selector: "button[type='submit'], .btn-calculate"
+        wait_after: 3000
+      
+      - action: wait_for
+        selector: ".quote-result, .price-display"
+        timeout: 15000
+      
+      - action: extract
+        fields:
+          price_monthly: ".price-monthly, .monthly-price"
+          price_yearly: ".price-yearly, .annual-price"
+          reference: ".quote-reference, .ref-number"
+          formula_name: ".formula-name, .plan-name"
+      
+      - action: screenshot
+        force: false
+  
+  # Assurance Moto
+  moto:
+    steps:
+      - action: navigate
+        url: "{{base_url}}{{simulator_path}}/moto"
+        timeout: 30000
+      
+      - action: wait_for
+        selector: "#usage"
+        timeout: 10000
+      
+      - action: select
+        selector: "#usage"
+        field: usage
+      
+      - action: fill_form
+        selectors:
+          vehicle_brand: "#brand"
+          vehicle_model: "#model"
+          driver_age: "#age"
+      
+      - action: click
+        selector: "button[type='submit']"
+        wait_after: 3000
+      
+      - action: wait_for
+        selector: ".quote-result"
+        timeout: 15000
+      
+      - action: extract
+        fields:
+          price_monthly: ".price-monthly"
+          price_yearly: ".price-yearly"
+          reference: ".quote-reference"
+  
+  # Assurance Habitation
+  habitation:
+    steps:
+      - action: navigate
+        url: "{{base_url}}{{simulator_path}}/habitation"
+        timeout: 30000
+      
+      - action: wait_for
+        selector: "#property_type"
+        timeout: 10000
+      
+      - action: select
+        selector: "#property_type"
+        field: property_type
+      
+      - action: fill_form
+        selectors:
+          surface_area: "#surface"
+          postal_code: "#postal_code"
+      
+      - action: click
+        selector: "button.calculate"
+        wait_after: 3000
+      
+      - action: wait_for
+        selector: ".results"
+        timeout: 15000
+      
+      - action: extract
+        fields:
+          price_monthly: ".price-monthly"
+          price_yearly: ".price-yearly"
+          formula_name: ".plan-name"
+
+# Règles de validation
+validation_rules:
+  - field: driver_age
+    min: 18
+    max: 99
+    required: true
+  
+  - field: vehicle_brand
+    required: true
+  
+  - field: vehicle_model
+    required: true
+  
+  - field: surface_area
+    min: 10
+    max: 1000
+    required: false
+
+# Sélecteurs communs (optionnel)
+selectors:
+  submit_button: "button[type='submit'], .btn-calculate"
+  price_container: ".quote-result, .price-display"
+  error_message: ".error-message, .alert-danger"

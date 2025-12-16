@@ -1,0 +1,448 @@
+"""
+RPA Models - Pydantic models pour les requêtes/réponses RPA
+Version: 1.0.3
+
+CHANGELOG v1.0.3:
+- Added automatic conversion for construction_year ranges (e.g., "1975_1999" -> 1987)
+- Added automatic conversion for capital_furniture ranges (e.g., "20000_40000" -> 30000)
+- Added automatic conversion for valuable_items ranges
+- Added rooms_count/floor_number/floors_count range conversion
+- Backward compatible: still accepts integer values
+- Added new MRH fields: heating_type, has_fireplace, has_pool, adults_count, children_count
+- Added claims_count, was_terminated, currently_insured fields
+
+CHANGELOG v1.0.2:
+- Added all MRH (Habitation) fields to QuoteFormData
+- Added rooms_count, floor_number, floors_count
+- Added occupant_status, residence_type, address
+- Added has_alarm, has_smoke_detector, has_pool
+- Added first_name, last_name for contact info
+- All original models preserved (zero regression)
+
+CHANGELOG v1.0.1:
+- Added RPAJobResponse for immediate job acceptance response
+- Fixed RPAQuoteResponse validator to accept only final statuses
+- Clarified usage documentation
+- All original models preserved (zero regression)
+"""
+
+from typing import Dict, List, Optional, Any, Union
+from pydantic import BaseModel, Field, validator
+from datetime import datetime
+
+
+def convert_range_to_midpoint(value: Union[str, int, None], default: Optional[int] = None) -> Optional[int]:
+    """
+    Convert a range string like "1975_1999" to its midpoint (1987).
+    Also handles "before_1949" -> 1940, "after_2020" -> 2022, etc.
+    Returns the value as-is if it's already an int.
+    """
+    if value is None:
+        return default
+    
+    if isinstance(value, int):
+        return value
+    
+    if isinstance(value, str):
+        value = value.strip()
+        
+        # Handle "before_XXXX" format
+        if value.startswith("before_"):
+            try:
+                year = int(value.replace("before_", ""))
+                return year - 10  # e.g., "before_1949" -> 1939
+            except ValueError:
+                pass
+        
+        # Handle "after_XXXX" format
+        if value.startswith("after_"):
+            try:
+                year = int(value.replace("after_", ""))
+                return year + 2  # e.g., "after_2020" -> 2022
+            except ValueError:
+                pass
+        
+        # Handle "XXXX_YYYY" range format
+        if "_" in value:
+            parts = value.split("_")
+            if len(parts) == 2:
+                try:
+                    start = int(parts[0])
+                    end = int(parts[1])
+                    return (start + end) // 2  # midpoint
+                except ValueError:
+                    pass
+        
+        # Handle plain numeric string
+        try:
+            return int(value)
+        except ValueError:
+            pass
+    
+    return default
+
+
+def convert_capital_range(value: Union[str, int, None]) -> Optional[int]:
+    """
+    Convert capital/value ranges to representative values.
+    E.g., "moins_10000" -> 8000, "10000_20000" -> 15000, "plus_60000" -> 70000
+    """
+    if value is None:
+        return None
+    
+    if isinstance(value, int):
+        return value
+    
+    if isinstance(value, str):
+        value = value.strip().lower()
+        
+        # Common French patterns
+        mapping = {
+            "moins_10000": 8000,
+            "moins_de_10000": 8000,
+            "10000_20000": 15000,
+            "20000_40000": 30000,
+            "40000_60000": 50000,
+            "plus_60000": 70000,
+            "plus_de_60000": 70000,
+            # English patterns
+            "less_10000": 8000,
+            "10k_20k": 15000,
+            "20k_40k": 30000,
+            "40k_60k": 50000,
+            "more_60000": 70000,
+        }
+        
+        if value in mapping:
+            return mapping[value]
+        
+        # Try generic range conversion
+        return convert_range_to_midpoint(value)
+    
+    return None
+
+
+class QuoteFormData(BaseModel):
+    """Données du formulaire de tarification - Tous produits"""
+    
+    # ==========================================================================
+    # Auto/Moto
+    # ==========================================================================
+    driver_age: Optional[int] = Field(None, ge=18, le=99)
+    vehicle_brand: Optional[str] = None
+    vehicle_model: Optional[str] = None
+    vehicle_year: Optional[int] = Field(None, ge=1990, le=2030)
+    usage: Optional[str] = Field(None, description="private, professional, mixed")
+    vehicle_usage: Optional[str] = Field(None, description="personal, professional, mixed")
+    driver_license_years: Optional[int] = Field(None, ge=0)
+    license_plate: Optional[str] = None
+    annual_mileage: Optional[int] = Field(None, ge=0, le=200000)
+    
+    # ==========================================================================
+    # Habitation (MRH) - Accept both int and string ranges
+    # ==========================================================================
+    property_type: Optional[str] = Field(None, description="apartment, house, villa")
+    surface_area: Optional[int] = Field(None, ge=5, le=2000)
+    rooms_count: Optional[int] = Field(None, ge=1, le=30)
+    floor_number: Optional[int] = Field(None, ge=0, le=100)
+    floors_count: Optional[int] = Field(None, ge=1, le=10)
+    construction_year: Optional[int] = Field(None, ge=1800, le=2030)
+    occupant_status: Optional[str] = Field(None, description="owner, tenant, pno")
+    residence_type: Optional[str] = Field(None, description="main, secondary")
+    address: Optional[str] = None
+    
+    # Equipment & Security
+    heating_type: Optional[str] = Field(None, description="electric, gas, oil, wood, heat_pump")
+    has_alarm: Optional[bool] = Field(default=False)
+    has_smoke_detector: Optional[bool] = Field(default=False)
+    has_pool: Optional[bool] = Field(default=False)
+    has_fireplace: Optional[bool] = Field(default=False)
+    has_reinforced_door: Optional[bool] = Field(default=False)
+    security_equipment: Optional[List[str]] = Field(default_factory=list)
+    
+    # Dependencies
+    has_cellar: Optional[bool] = Field(default=False)
+    has_garage: Optional[bool] = Field(default=False)
+    dependencies_surface: Optional[int] = Field(None, ge=0, le=500)
+    
+    # Occupants
+    adults_count: Optional[int] = Field(None, ge=1, le=20)
+    children_count: Optional[int] = Field(None, ge=0, le=20)
+    is_colocation: Optional[bool] = Field(default=False)
+    colocataires_count: Optional[int] = Field(None, ge=0, le=10)
+    
+    # Capital & Values (accept ranges or integers)
+    capital_furniture: Optional[int] = Field(None, ge=0)
+    valuable_items: Optional[int] = Field(None, ge=0)
+    
+    # History
+    move_in_date: Optional[str] = None
+    claims_count: Optional[int] = Field(None, ge=0, le=10)
+    was_terminated: Optional[bool] = Field(default=False)
+    currently_insured: Optional[bool] = Field(default=True)
+    
+    # ==========================================================================
+    # Santé
+    # ==========================================================================
+    birth_date: Optional[str] = None
+    gender: Optional[str] = Field(None, description="M, F")
+    occupation: Optional[str] = None
+    
+    # ==========================================================================
+    # Emprunteur
+    # ==========================================================================
+    loan_amount: Optional[float] = Field(None, ge=0)
+    loan_duration_years: Optional[int] = Field(None, ge=1, le=30)
+    
+    # ==========================================================================
+    # Coordonnées / Contact
+    # ==========================================================================
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    postal_code: Optional[str] = None
+    city: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+
+    # ==========================================================================
+    # Validators - Convert ranges to integers
+    # ==========================================================================
+    
+    @validator('construction_year', pre=True, always=True)
+    def convert_construction_year(cls, v):
+        """Convert construction year range to midpoint integer."""
+        if v is None:
+            return None
+        result = convert_range_to_midpoint(v, default=2000)
+        return result
+    
+    @validator('rooms_count', pre=True, always=True)
+    def convert_rooms_count(cls, v):
+        """Convert rooms count range to integer."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            # Handle "5+" or "5_plus" -> 5
+            v = v.replace("+", "").replace("_plus", "")
+            try:
+                return int(v)
+            except ValueError:
+                return convert_range_to_midpoint(v, default=3)
+        return v
+    
+    @validator('floor_number', pre=True, always=True)
+    def convert_floor_number(cls, v):
+        """Convert floor number range to integer."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            # Handle "rdc" or "ground" -> 0
+            if v.lower() in ['rdc', 'ground', 'rez-de-chaussée', 'rez_de_chaussee']:
+                return 0
+            # Handle "5+" -> 5
+            v = v.replace("+", "").replace("_plus", "")
+            try:
+                return int(v)
+            except ValueError:
+                return convert_range_to_midpoint(v, default=1)
+        return v
+    
+    @validator('capital_furniture', pre=True, always=True)
+    def convert_capital_furniture(cls, v):
+        """Convert capital furniture range to integer."""
+        return convert_capital_range(v)
+    
+    @validator('valuable_items', pre=True, always=True)
+    def convert_valuable_items(cls, v):
+        """Convert valuable items range to integer."""
+        return convert_capital_range(v)
+    
+    @validator('surface_area', pre=True, always=True)
+    def convert_surface_area(cls, v):
+        """Convert surface area to integer."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            try:
+                return int(v)
+            except ValueError:
+                return convert_range_to_midpoint(v, default=50)
+        return v
+
+    @validator('usage')
+    def validate_usage(cls, v):
+        if v and v not in ['private', 'professional', 'mixed']:
+            raise ValueError('usage must be private, professional, or mixed')
+        return v
+
+    @validator('vehicle_usage')
+    def validate_vehicle_usage(cls, v):
+        if v and v not in ['personal', 'professional', 'mixed']:
+            raise ValueError('vehicle_usage must be personal, professional, or mixed')
+        return v
+
+    @validator('gender')
+    def validate_gender(cls, v):
+        if v and v not in ['M', 'F']:
+            raise ValueError('gender must be M or F')
+        return v
+
+    @validator('property_type')
+    def validate_property_type(cls, v):
+        if v and v not in ['apartment', 'house', 'villa', 'studio', 'loft']:
+            raise ValueError('property_type must be apartment, house, villa, studio, or loft')
+        return v
+
+    @validator('occupant_status')
+    def validate_occupant_status(cls, v):
+        if v and v not in ['owner', 'tenant', 'pno']:
+            raise ValueError('occupant_status must be owner, tenant, or pno')
+        return v
+
+    @validator('residence_type')
+    def validate_residence_type(cls, v):
+        if v and v not in ['main', 'secondary']:
+            raise ValueError('residence_type must be main or secondary')
+        return v
+    
+    @validator('heating_type')
+    def validate_heating_type(cls, v):
+        if v and v not in ['electric', 'gas', 'oil', 'wood', 'heat_pump', 'other']:
+            raise ValueError('heating_type must be electric, gas, oil, wood, heat_pump, or other')
+        return v
+
+
+class RPAQuoteRequest(BaseModel):
+    """Requête de scraping de devis RPA"""
+    job_id: str = Field(..., description="ID unique du job")
+    callback_url: str = Field(..., description="URL de callback pour le résultat")
+    product_code: str = Field(..., description="auto, moto, habitation, sante, emprunteur")
+    insurer_name: str = Field(..., description="Nom de l'assureur")
+    form_data: QuoteFormData
+    config_yaml: Optional[str] = Field(default="", description="Configuration YAML de l'assureur (vide = utiliser config chargée)")
+    timeout: Optional[int] = Field(default=60, ge=10, le=300, description="Timeout en secondes")
+
+    @validator('product_code')
+    def validate_product_code(cls, v):
+        allowed = ['auto', 'moto', 'habitation', 'mrh', 'sante', 'emprunteur', 'prevoyance', 'rc_pro', 'animaux']
+        if v not in allowed:
+            raise ValueError(f'product_code must be one of {allowed}')
+        return v
+
+
+class RPAJobResponse(BaseModel):
+    """
+    Response model for immediate job acceptance (NEW in v1.0.1).
+
+    This is returned immediately when the RPA job is accepted and queued.
+    The actual scraping result will be sent later via callback to callback_url.
+
+    Usage: Return this from POST /rpa/quote endpoint
+    """
+    success: bool = Field(default=True, description="Whether job was accepted")
+    job_id: str = Field(..., description="Job identifier")
+    message: str = Field(default="RPA job queued successfully", description="Status message")
+    insurer: Optional[str] = Field(None, description="Insurer name")
+    product: Optional[str] = Field(None, description="Product code")
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat(), description="Timestamp of acceptance")
+
+
+class CoverageDetail(BaseModel):
+    """Détail d'une garantie"""
+    name: str
+    included: bool = True
+    limit: Optional[str] = None
+    deductible: Optional[str] = None
+
+
+class QuoteResult(BaseModel):
+    """Résultat d'un scraping de devis"""
+    price_monthly: Optional[float] = Field(None, description="Prix mensuel")
+    price_yearly: Optional[float] = Field(None, description="Prix annuel")
+    currency: str = Field(default="EUR", description="Devise")
+    coverage_details: Dict[str, Any] = Field(default_factory=dict)
+    quote_reference: Optional[str] = Field(None, description="Référence du devis")
+    pdf_url: Optional[str] = Field(None, description="URL du PDF")
+    formula_name: Optional[str] = Field(None, description="Nom de la formule")
+    insurer_logo_url: Optional[str] = None
+    valid_until: Optional[str] = None
+    guarantees: Optional[str] = Field(None, description="Garanties incluses")
+    additional_info: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RPAQuoteResponse(BaseModel):
+    """
+    Réponse du scraping RPA (sent via callback after completion).
+
+    This model is used for the CALLBACK after scraping completes.
+    It is NOT used for the immediate API response (use RPAJobResponse instead).
+
+    Usage: Send this to callback_url when scraping job finishes
+    """
+    status: str = Field(..., description="success, failed, timeout")
+    job_id: str
+    result: Optional[QuoteResult] = None
+    error_message: Optional[str] = None
+    duration_ms: int
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+    screenshots: List[str] = Field(default_factory=list, description="URLs des screenshots")
+
+    @validator('status')
+    def validate_status(cls, v):
+        if v not in ['success', 'failed', 'timeout']:
+            raise ValueError('status must be success, failed, or timeout')
+        return v
+
+
+class InsurerConfig(BaseModel):
+    """Configuration d'un assureur parsée depuis YAML"""
+    insurer_name: str
+    base_url: str
+    simulator_path: Optional[str] = None
+    country: str = Field(default="FR")
+    complexity: int = Field(..., ge=1, le=5)
+    rating: Optional[float] = Field(None, ge=0, le=5)
+
+    workflows: Dict[str, Any] = Field(default_factory=dict)
+    validation_rules: List[Dict[str, Any]] = Field(default_factory=list)
+    selectors: Dict[str, Any] = Field(default_factory=dict)
+
+    # Configuration avancée
+    requires_cookies: bool = Field(default=False)
+    has_captcha: bool = Field(default=False)
+    wait_after_load: int = Field(default=2000, description="Temps d'attente après chargement (ms)")
+    max_retries: int = Field(default=3, ge=1, le=5)
+    screenshot_on_error: bool = Field(default=True)
+
+
+class RPAStats(BaseModel):
+    """Statistiques RPA"""
+    total_jobs: int = 0
+    successful_jobs: int = 0
+    failed_jobs: int = 0
+    timeout_jobs: int = 0
+    average_duration_ms: float = 0.0
+    jobs_by_insurer: Dict[str, int] = Field(default_factory=dict)
+    jobs_by_product: Dict[str, int] = Field(default_factory=dict)
+    success_rate: float = 0.0
+    last_updated: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+
+class ConfigReloadRequest(BaseModel):
+    """Requête de rechargement de configuration"""
+    force: bool = Field(default=False, description="Forcer le rechargement même si cache valide")
+
+
+class ConfigReloadResponse(BaseModel):
+    """Réponse du rechargement de configuration"""
+    success: bool
+    message: str
+    configs_loaded: int = 0
+    insurers: List[str] = Field(default_factory=list)
+    timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+    errors: List[str] = Field(default_factory=list)
+
+
+# Aliases for compatibility with main.py endpoints
+RPAStatsResponse = RPAStats
+RPAReloadResponse = ConfigReloadResponse

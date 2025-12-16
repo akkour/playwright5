@@ -1,0 +1,767 @@
+"""
+EvaRAG Enhanced Crawler Service v3.13.2 - RPA Quote Integration (Fixed)
+Service de crawling avec Playwright — version complète, ZÉRO régression.
+
+✅ CORRECTIONS MAJEURES v3.13.2:
+- (C1-9) Fixed /rpa/reload-config endpoint to accept 'force: true' payload.
+- (C1-9) Added ConfigReloadRequest import from rpa.models.
+
+✅ CORRECTIONS MAJEURES v3.13.1:
+- Fixed RPAJobResponse import and usage for immediate job acceptance
+- RPAQuoteResponse now only used for callback (not immediate response)
+- Fixed Pydantic validation error: "queued" status replaced with proper RPAJobResponse
+- Fixed logging duplication and indentation issues
+
+✅ v3.13: Module RPA intégré pour scraping d'assurances marocaines
+✅ v3.12: Détection des redirections initiales (ex: /fr) et contrainte dynamique du crawl.
+- Worker asynchrone intelligent avec déduplication et normalisation d'URL à la volée.
+- Authentification Basique unifiée pour les endpoints sécurisés.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import json
+import time
+import secrets
+import psutil
+import hashlib
+import asyncio
+import aiofiles
+import random
+from datetime import datetime
+from collections import deque, defaultdict
+from typing import List, Optional, Dict, Any, Tuple, Union
+
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+
+import httpx
+from bs4 import BeautifulSoup
+import redis.asyncio as redis
+
+from fastapi import (
+    FastAPI, Request, HTTPException, BackgroundTasks, Header, Depends, status
+)
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.responses import JSONResponse, StreamingResponse, Response, HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field, AnyHttpUrl
+
+from prometheus_client import Counter, Histogram, Gauge, generate_latest
+
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+
+# =========================
+# Logging (must be defined early)
+# =========================
+import logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# =========================
+# RPA Module Imports
+# =========================
+try:
+    from rpa import (
+        quote_scraper,
+        config_manager,
+        exceptions as rpa_exceptions
+    )
+    from rpa.models import (
+        RPAQuoteRequest,
+        RPAJobResponse,  # ← FIXED: Added for immediate response
+        RPAQuoteResponse,  # ← Still used for callback
+        RPAStatsResponse,
+        RPAReloadResponse,
+        ConfigReloadRequest  # <-- MODIFICATION (C1-9)
+    )
+    RPA_MODULE_LOADED = True
+    RPA_VERSION = "1.0.1"  # ← Updated version
+    logger.info(f"✅ RPA module loaded: v{RPA_VERSION}")
+except ImportError as e:
+    RPA_MODULE_LOADED = False
+    RPA_VERSION = "not_loaded"
+    logger.warning(f"⚠️ RPA module not available: {e}")
+
+# =========================
+# Configuration & Globals
+# =========================
+
+APP_NAME = "EvaRAG Crawler Service"
+APP_VERSION = "3.13.2"  # ← Updated version
+
+CRAWLER_WORKER_SECRET = os.getenv("CRAWLER_WORKER_SECRET", "")
+DEFAULT_CALLBACK_URL = os.getenv("CRAWLER_CALLBACK_URL", "")
+
+class Config:
+    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+    DEFAULT_NAV_TIMEOUT = int(os.getenv("DEFAULT_NAV_TIMEOUT", 60000))
+    NETWORK_IDLE_TIMEOUT = int(os.getenv("NETWORK_IDLE_TIMEOUT", 25000))
+    SCREENSHOT_TIMEOUT = int(os.getenv("SCREENSHOT_TIMEOUT", 5000))
+    STATIC_TIMEOUT = 30.0
+    MAX_LINKS_RETURNED = 50
+    MAX_CONCURRENT_PAGES = 3
+    MAX_RETRIES = 3
+    CACHE_TTL = 3600
+    MONITORING_INTERVAL = 5
+    METRICS_RETENTION = 86400
+    LOG_DIR = Path("logs")
+    BFS_QUEUE_MULTIPLIER = 3.0
+    BFS_SEEN_MULTIPLIER = 5.0
+    CALLBACK_TIMEOUT = 30
+    CALLBACK_RETRY_COUNT = 3
+
+# =========================
+# Authentification
+# =========================
+security = HTTPBasic()
+BASIC_AUTH_USER = os.getenv("BASIC_AUTH_USER", "admin")
+BASIC_AUTH_PASS = os.getenv("BASIC_AUTH_PASS", "Hg.54.uyt.$$!!.xcv")
+
+def verify_basic_auth(credentials: HTTPBasicCredentials = Depends(security)):
+    correct_username = secrets.compare_digest(credentials.username, BASIC_AUTH_USER)
+    correct_password = secrets.compare_digest(credentials.password, BASIC_AUTH_PASS)
+    if not (correct_username and correct_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
+
+# =========================
+# Pydantic Models (Crawler)
+# =========================
+
+class CrawlRequest(BaseModel):
+    urls: List[AnyHttpUrl]
+    max_depth: int = Field(default=2, ge=1, le=5)
+    max_pages: int = Field(..., ge=1, le=500)
+    extract_text: bool = True
+    render_js: bool = True
+    chunk_size: int = Field(default=1000, ge=100, le=10000)
+    chunk_overlap: int = Field(default=100, ge=0, le=1000)
+    include_patterns: List[str] = []
+    exclude_patterns: List[str] = []
+    wait_selector: Optional[str] = None
+    timeout: int = Field(default=30, ge=5, le=180)
+
+class CrawlJobRequest(BaseModel):
+    site_id: str
+    organization_id: str
+    url: AnyHttpUrl
+    callback_url: AnyHttpUrl
+    depth: int = Field(default=2, ge=1, le=5)
+    max_pages: int = Field(default=10, ge=1, le=500)
+    render_js: bool = True
+    extract_text: bool = True
+    chunk_size: int = Field(default=1000, ge=100, le=10000)
+    chunk_overlap: int = Field(default=100, ge=0, le=1000)
+    correlation_id: Optional[str] = None
+    include_patterns: List[str] = []
+    exclude_patterns: List[str] = []
+
+class CrawlResult(BaseModel):
+    url: str
+    title: str
+    textContent: str
+    description: str = ""
+    language: str = "unknown"
+    wordCount: int = 0
+    images: List[str] = []
+    links: List[str] = []
+    depth: int = 0
+    crawled_at: str
+    response_time: float = 0.0
+    status_code: int = 200
+
+class CrawlResponse(BaseModel):
+    success: bool
+    results: List[CrawlResult] = []
+    summary: Dict[str, Any] = {}
+    errors: List[str] = []
+    timestamp: str
+
+# =========================
+# Métriques Prometheus
+# =========================
+
+crawl_requests_total = Counter('crawl_requests_total', 'Total crawl requests')
+crawl_success_total = Counter('crawl_success_total', 'Successful crawls')
+crawl_failures_total = Counter('crawl_failures_total', 'Failed crawls')
+crawl_duration_seconds = Histogram('crawl_duration_seconds', 'Crawl duration')
+active_crawls = Gauge('active_crawls_total', 'Currently active crawls')
+
+# RPA Metrics
+rpa_requests_total = Counter('rpa_requests_total', 'Total RPA requests')
+rpa_success_total = Counter('rpa_success_total', 'Successful RPA jobs')
+rpa_failures_total = Counter('rpa_failures_total', 'Failed RPA jobs')
+rpa_duration_seconds = Histogram('rpa_duration_seconds', 'RPA job duration')
+
+# =========================
+# Classes de Support
+# =========================
+
+class CrawlStats:
+    def __init__(self):
+        self.daily_stats = defaultdict(int)
+        self.reset_daily_stats()
+
+    def reset_daily_stats(self):
+        self.daily_stats.update({
+            "total_requests": 0, "successful_crawls": 0, "failed_crawls": 0,
+            "domains_crawled": set(), "total_processing_time": 0.0,
+            "errors_by_type": defaultdict(int), "last_request_time": None
+        })
+
+    def update(self, **kwargs):
+        for key, value in kwargs.items():
+            if key == "domains_crawled" and isinstance(value, str):
+                self.daily_stats[key].add(value)
+            elif key == "errors_by_type" and isinstance(value, dict):
+                for error_type, count in value.items():
+                    self.daily_stats[key][error_type] += count
+            else:
+                self.daily_stats[key] += value
+
+class JobManager:
+    def __init__(self):
+        self.jobs = {}
+        self.results = {}
+
+    def create_job(self, job_id: str, data: dict) -> str:
+        self.jobs[job_id] = { 'id': job_id, 'status': 'queued', 'created_at': datetime.now().isoformat(), 'data': data }
+        return job_id
+
+    def update_job(self, job_id: str, updates: dict):
+        if job_id in self.jobs:
+            self.jobs[job_id].update(updates)
+
+    def get_job(self, job_id: str) -> Optional[dict]:
+        return self.jobs.get(job_id)
+
+    def set_job_result(self, job_id: str, result: dict):
+        self.results[job_id] = result
+        self.update_job(job_id, {'status': 'completed'})
+
+class CallbackManager:
+    def __init__(self):
+        self.client = httpx.AsyncClient(timeout=Config.CALLBACK_TIMEOUT)
+
+    async def send_callback(self, url: str, event_type: str, data: dict, job_id: str):
+        if not url: return
+        payload = { 'type': event_type, 'job_id': job_id, 'timestamp': datetime.now().isoformat(), **data }
+        headers = { 'Content-Type': 'application/json', 'X-Crawler-Secret': CRAWLER_WORKER_SECRET }
+        try:
+            await self.client.post(url, json=payload, headers=headers)
+        except Exception as e:
+            logger.error(f"❌ Callback error: {str(e)}")
+
+    async def close(self):
+        await self.client.aclose()
+
+# =========================
+# Initialisation Globale
+# =========================
+
+app = FastAPI(title=APP_NAME, version=APP_VERSION)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+job_manager = JobManager()
+callback_manager = CallbackManager()
+
+# RPA Config Manager
+if RPA_MODULE_LOADED:
+    rpa_config = config_manager
+    try:
+        rpa_config.load_all_configs()
+        logger.info(f"✅ Loaded {len(rpa_config.list_insurers())} RPA configurations")
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to load RPA configs: {e}")
+
+# =========================
+# Utilitaires
+# =========================
+
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/126.0",
+]
+
+def clean_text(text: str) -> str:
+    if not text: return ""
+    cleaned = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]', '', text)
+    return re.sub(r'\s+', ' ', cleaned).strip()
+
+def extract_domain(url: str) -> str:
+    try: return urlparse(url).netloc.lower()
+    except: return ""
+
+def normalize_url(url: str) -> str:
+    try:
+        parts = urlparse(url)
+        netloc = parts.netloc.lower()
+        path = parts.path.rstrip('/') if len(parts.path) > 1 else parts.path
+        params_to_remove = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'fbclid', 'mc_cid', 'mc_eid']
+        query_params = [p for p in parse_qsl(parts.query) if p[0] not in params_to_remove]
+        query_params.sort(key=lambda x: x[0])
+        query_string = urlencode(query_params)
+        return urlunparse((parts.scheme, netloc, path, parts.params, query_string, ''))
+    except Exception:
+        return url
+
+def should_crawl_url(url: str, base_domain: str, include: List[str], exclude: List[str]) -> bool:
+    normalized_url = normalize_url(url)
+    if urlparse(normalized_url).netloc.lower() != base_domain: return False
+    if any(re.search(p, normalized_url, re.IGNORECASE) for p in exclude): return False
+    if include:
+        return any(re.search(p, normalized_url, re.IGNORECASE) for p in include)
+    return True
+
+# =========================
+# Fonctions de Crawling
+# =========================
+
+async def crawl_page(page, url: str, depth: int, links_limit: Optional[int] = None) -> Optional[CrawlResult]:
+    start_time = time.time()
+    try:
+        logger.info(f"🔍 Crawling: {url} (depth: {depth})")
+        response = await page.goto(url, wait_until="domcontentloaded", timeout=Config.DEFAULT_NAV_TIMEOUT)
+        if not response: return None
+        await page.wait_for_load_state("networkidle", timeout=Config.NETWORK_IDLE_TIMEOUT)
+        title = await page.title()
+        title = clean_text(title) or "Sans titre"
+        text_content = await page.evaluate("() => document.body.innerText")
+        text_content = clean_text(text_content)
+        if len(text_content) < 50:
+            logger.warning(f"⚠️ Page has insufficient content: {url}")
+            return None
+        description = await page.evaluate("() => document.querySelector('meta[name=\"description\"]')?.content || ''")
+        description = clean_text(description)
+        language = await page.evaluate("() => document.documentElement.lang || 'unknown'")
+        images = await page.evaluate("() => Array.from(document.querySelectorAll('img[src]')).map(img => img.src).slice(0, 10)")
+        limit = links_limit if isinstance(links_limit, int) else Config.MAX_LINKS_RETURNED
+        links = await page.evaluate(f"""() => Array.from(document.querySelectorAll('a[href]')).map(a => a.href).filter(h => h.startsWith('http') && !h.includes('#')).slice(0, {int(limit)})""")
+        return CrawlResult(
+            url=url, title=title, textContent=text_content, description=description, language=language,
+            wordCount=len(text_content.split()), images=images, links=links, depth=depth,
+            crawled_at=datetime.now().isoformat(), response_time=time.time() - start_time, status_code=response.status
+        )
+    except PlaywrightTimeoutError:
+        logger.warning(f"⏰ Timeout crawling: {url}")
+        try:
+            screenshot_path = "debug_timeout_screenshot.png"
+            await page.screenshot(path=screenshot_path, timeout=Config.SCREENSHOT_TIMEOUT)
+            logger.info(f"📸 Screenshot saved to {screenshot_path} for debugging.")
+        except Exception as screenshot_error:
+            logger.error(f"💥 Failed to take screenshot for {url}: {screenshot_error}")
+        return None
+    except Exception as e:
+        logger.error(f"💥 Error crawling {url}: {str(e)}")
+        return None
+
+async def crawl_sync(request: CrawlRequest) -> CrawlResponse:
+    start_time = time.time()
+    results, errors = [], []
+    try:
+        start_url = str(request.urls[0])
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.head(start_url, follow_redirects=True, timeout=15.0)
+                final_url_obj = response.url
+                if str(final_url_obj) != start_url and urlparse(str(final_url_obj)).path not in ('', '/'):
+                    base_path = f"{final_url_obj.scheme}://{final_url_obj.host}{urlparse(str(final_url_obj)).path}"
+                    if '.' not in Path(urlparse(str(final_url_obj)).path).name:
+                        base_path = base_path.rstrip('/')
+                        include_pattern = f"^{re.escape(base_path)}"
+                        if include_pattern not in request.include_patterns:
+                            request.include_patterns.append(include_pattern)
+                            logger.info(f"Redirect detected. Constraining crawl to pattern: {include_pattern}")
+            except httpx.RequestError as e:
+                logger.warning(f"Could not check for initial redirect: {e}")
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(
+                user_agent=random.choice(USER_AGENTS),
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9,fr;q=0.8"}
+            )
+            page = await context.new_page()
+            to_visit = deque([(start_url, 0)])
+            visited = {start_url}
+            base_domain = extract_domain(start_url)
+            while to_visit and len(results) < request.max_pages:
+                url, depth = to_visit.popleft()
+                if depth > request.max_depth: continue
+                result = await crawl_page(page, url, depth)
+                if result:
+                    results.append(result)
+                    if depth < request.max_depth:
+                        for link in result.links:
+                            if link not in visited and should_crawl_url(link, base_domain, request.include_patterns, request.exclude_patterns):
+                                visited.add(link)
+                                to_visit.append((link, depth + 1))
+                else:
+                    errors.append(f"Failed to crawl: {url}")
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+            await browser.close()
+    except Exception as e:
+        logger.error(f"💥 Crawling error: {str(e)}")
+        errors.append(str(e))
+    duration = time.time() - start_time
+    return CrawlResponse(
+        success=len(results) > 0, results=results, errors=errors, timestamp=datetime.now().isoformat(),
+        summary={ "total_pages": len(results), "total_errors": len(errors), "duration_seconds": round(duration, 2) }
+    )
+
+async def crawl_async_worker(job_id: str, job_data: CrawlJobRequest):
+    start_time = time.time()
+    logger.info(f"🚀 Starting async stream job: {job_id} for {job_data.url}")
+    await callback_manager.send_callback(str(job_data.callback_url), 'heartbeat', {'status': 'started'}, job_id)
+    
+    results, pages_attempted, documents_created_count = [], 0, 0
+    content_hashes_seen, errors = set(), []
+    base_domain = extract_domain(str(job_data.url))
+    include_patterns = job_data.include_patterns or []
+    exclude_patterns = job_data.exclude_patterns or []
+
+    try:
+        start_url = str(job_data.url)
+        async with httpx.AsyncClient() as client:
+            try:
+                response = await client.head(start_url, follow_redirects=True, timeout=15.0)
+                final_url_obj = response.url
+                if str(final_url_obj) != start_url and urlparse(str(final_url_obj)).path not in ('', '/'):
+                    base_path = f"{final_url_obj.scheme}://{final_url_obj.host}{urlparse(str(final_url_obj)).path}"
+                    if '.' not in Path(urlparse(str(final_url_obj)).path).name:
+                        base_path = base_path.rstrip('/')
+                        include_pattern = f"^{re.escape(base_path)}"
+                        if include_pattern not in include_patterns:
+                            include_patterns.append(include_pattern)
+                            logger.info(f"Redirect detected. Constraining crawl to pattern: {include_pattern}")
+            except httpx.RequestError as e:
+                logger.warning(f"Could not check for initial redirect: {e}")
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
+            page = await context.new_page()
+            to_visit = deque([(start_url, 0)])
+            visited = {start_url}
+            await callback_manager.send_callback(str(job_data.callback_url), 'pages_found', {'total': job_data.max_pages}, job_id)
+            while to_visit and len(results) < job_data.max_pages:
+                url, depth = to_visit.popleft()
+                if depth > job_data.depth: continue
+                pages_attempted += 1
+                result = await crawl_page(page, url, depth)
+                if result:
+                    results.append(result)
+                    content_hash = hashlib.sha256(result.textContent.encode()).hexdigest()
+                    if content_hash not in content_hashes_seen:
+                        content_hashes_seen.add(content_hash)
+                        documents_created_count += 1
+                        normalized_url = normalize_url(result.url)
+                        source_id_hash = hashlib.sha256(normalized_url.encode()).hexdigest()
+                        logger.info(f"📄 [{job_id}] New unique content found, sending document: {url}")
+                        doc_data = {
+                            'title': result.title, 'content': result.textContent, 'source_id': f"{job_data.site_id}_{source_id_hash}",
+                            'metadata': { 'url': normalized_url, 'description': result.description, 'word_count': result.wordCount,
+                                        'crawled_at': result.crawled_at, 'depth': result.depth, 'language': result.language },
+                            'site_id': job_data.site_id, 'organization_id': job_data.organization_id
+                        }
+                        await callback_manager.send_callback(str(job_data.callback_url), 'document_created', {'doc': doc_data}, job_id)
+                    if depth < job_data.depth:
+                        for link in result.links:
+                            if link not in visited and should_crawl_url(link, base_domain, include_patterns, exclude_patterns):
+                                visited.add(link)
+                                to_visit.append((link, depth + 1))
+                else:
+                    errors.append(f"Failed to crawl: {url}")
+                await callback_manager.send_callback(str(job_data.callback_url), 'progress', 
+                    {'pages_crawled': pages_attempted, 'documents_created': documents_created_count}, job_id)
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+            await browser.close()
+        duration = time.time() - start_time
+        summary = { "total_pages": len(results), "documents_created": documents_created_count,
+                    "total_errors": len(errors), "duration_seconds": round(duration, 2) }
+        await callback_manager.send_callback(str(job_data.callback_url), 'completed', {'metrics': summary}, job_id)
+        job_manager.set_job_result(job_id, {"summary": summary, "errors": errors})
+        logger.info(f"✅ Async stream job finished: {job_id}")
+    except Exception as e:
+        logger.error(f"💥 Async worker failed: {job_id} - {str(e)}")
+        await callback_manager.send_callback(str(job_data.callback_url), 'failed', {'error': str(e)}, job_id)
+        job_manager.update_job(job_id, {'status': 'failed', 'error': str(e)})
+
+# =========================
+# RPA Background Worker
+# =========================
+
+async def rpa_quote_worker(job_id: str, request_data: RPAQuoteRequest):
+    """
+    Background worker for RPA quote scraping.
+    Sends result via callback when complete.
+    """
+    if not RPA_MODULE_LOADED:
+        logger.error(f"❌ [RPA] Module not loaded, cannot process job {job_id}")
+        return
+    
+    start_time = time.time()
+    logger.info(f"🤖 [RPA] Starting job {job_id} for {request_data.insurer_name} - {request_data.product_code}")
+    
+    try:
+        # Create scraper
+        scraper = quote_scraper.QuoteScraper(
+            config_manager=rpa_config,
+            timeout=request_data.timeout
+        )
+        
+        # Execute scraping
+        result = await scraper.scrape_quote(
+            insurer_name=request_data.insurer_name,
+            product_code=request_data.product_code,
+            form_data=request_data.form_data,
+            config_yaml_override=request_data.config_yaml if request_data.config_yaml else None
+        )
+        
+        duration_ms = (time.time() - start_time) * 1000
+        
+        # Build callback response
+        callback_payload = RPAQuoteResponse(
+            job_id=job_id,
+            status="success",
+            result=result,
+            duration_ms=duration_ms
+        )
+        
+        # Send callback
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            await client.post(
+                request_data.callback_url,
+                json=callback_payload.dict(),
+                headers={"Content-Type": "application/json"}
+            )
+        
+        logger.info(f"✅ [RPA] Job {job_id} completed successfully in {duration_ms:.0f}ms")
+        rpa_success_total.inc()
+        
+    except rpa_exceptions.InsurerNotFoundError as e:
+        logger.error(f"❌ [RPA] Insurer not found for job {job_id}: {str(e)}")
+        callback_payload = RPAQuoteResponse(
+            job_id=job_id,
+            status="failed",
+            error_message=str(e)
+        )
+        rpa_failures_total.inc()
+        
+    except rpa_exceptions.ScrapingTimeoutError as e:
+        logger.error(f"⏰ [RPA] Timeout for job {job_id}: {str(e)}")
+        callback_payload = RPAQuoteResponse(
+            job_id=job_id,
+            status="timeout",
+            error_message=str(e)
+        )
+        rpa_failures_total.inc()
+        
+    except Exception as e:
+        logger.error(f"💥 [RPA] Unexpected error for job {job_id}: {str(e)}")
+        callback_payload = RPAQuoteResponse(
+            job_id=job_id,
+            status="failed",
+            error_message=f"Unexpected error: {str(e)}"
+        )
+        rpa_failures_total.inc()
+        
+        # Send error callback
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                await client.post(
+                    request_data.callback_url,
+                    json=callback_payload.dict(),
+                    headers={"Content-Type": "application/json"}
+                )
+        except Exception as callback_error:
+            logger.error(f"💥 [RPA] Failed to send error callback for job {job_id}: {callback_error}")
+
+# =========================
+# Endpoints
+# =========================
+
+@app.get("/health")
+@app.get("/crawl4ai/health")
+async def health():
+    return {
+        "status": "healthy",
+        "service": APP_NAME,
+        "version": APP_VERSION,
+        "rpa_version": RPA_VERSION,
+        "rpa_enabled": RPA_MODULE_LOADED
+    }
+
+@app.post("/crawl")
+@app.post("/crawl4ai/crawl")
+async def crawl_endpoint(req: CrawlRequest, username: str = Depends(verify_basic_auth)):
+    with crawl_duration_seconds.time(), active_crawls.track_inprogress():
+        try:
+            result = await crawl_sync(req)
+            crawl_success_total.inc()
+            return result
+        except Exception as e:
+            crawl_failures_total.inc()
+            raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/jobs")
+@app.post("/crawl4ai/jobs")
+async def submit_job_async(job: CrawlJobRequest, background: BackgroundTasks, x_job_id: Optional[str] = Header(default=None), username: str = Depends(verify_basic_auth)):
+    logger.info(f"Authenticated user '{username}' submitted a job for site {job.site_id}.")
+    job_id = x_job_id or f"crawl_{int(time.time())}_{hash(str(job.url)) % 10000}"
+    job_manager.create_job(job_id, job.dict())
+    background.add_task(crawl_async_worker, job_id, job)
+    logger.info(f"🆔 Async job created: {job_id}")
+    return { 'success': True, 'job_id': job_id, 'status': 'queued', 'message': 'Job queued for processing', 'callback_url': str(job.callback_url) }
+
+@app.get("/jobs/{job_id}")
+async def get_job(job_id: str, username: str = Depends(verify_basic_auth)):
+    job = job_manager.get_job(job_id)
+    if not job: raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") == "completed":
+        return {"job": job, "result": job_manager.results.get(job_id)}
+    return {"job": job}
+
+# =========================
+# RPA Endpoints
+# =========================
+
+@app.post("/rpa/quote", response_model=RPAJobResponse)  # ← FIXED: Changed from RPAQuoteResponse
+async def rpa_quote_endpoint(
+    request: RPAQuoteRequest,
+    background: BackgroundTasks,
+    username: str = Depends(verify_basic_auth)
+):
+    """
+    Submit an RPA quote scraping job.
+    Returns immediately with job acceptance status.
+    Actual result will be sent to callback_url when scraping completes.
+    """
+    if not RPA_MODULE_LOADED:
+        raise HTTPException(
+            status_code=503,
+            detail="RPA module not available"
+        )
+    
+    logger.info(f"🤖 [RPA] Quote request received: {request.job_id} for {request.insurer_name} - {request.product_code}")
+    
+    # Validate insurer exists (if not using config_yaml override)
+    if not request.config_yaml:
+        if request.insurer_name not in rpa_config.list_insurers():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Insurer '{request.insurer_name}' not found in loaded configurations"
+            )
+    
+    # Queue background task
+    background.add_task(rpa_quote_worker, request.job_id, request)
+    rpa_requests_total.inc()
+    
+    # Return immediate acceptance response (NOT the final result)
+    return RPAJobResponse(  # ← FIXED: Using RPAJobResponse instead of RPAQuoteResponse
+        success=True,
+        job_id=request.job_id,
+        message="RPA job queued successfully",
+        insurer=request.insurer_name,
+        product=request.product_code
+    )
+
+@app.get("/rpa/stats", response_model=RPAStatsResponse)
+async def rpa_stats_endpoint(username: str = Depends(verify_basic_auth)):
+    """Get RPA module statistics and configuration"""
+    if not RPA_MODULE_LOADED:
+        raise HTTPException(
+            status_code=503,
+            detail="RPA module not available"
+        )
+    
+    logger.info(f"🤖 [RPA] Stats requested")
+    
+    insurers = rpa_config.list_insurers()
+    
+    # Build products by insurer
+    products_by_insurer = {}
+    for insurer_name in insurers:
+        try:
+            config = rpa_config.get_config(insurer_name)
+            products_by_insurer[insurer_name] = list(config.get("workflows", {}).keys())
+        except Exception:
+            products_by_insurer[insurer_name] = []
+    
+    return RPAStatsResponse(
+        rpa_version=RPA_VERSION,
+        config={
+            "total_insurers": len(insurers),
+            "insurers": insurers,
+            "last_reload": rpa_config.last_reload.isoformat() if rpa_config.last_reload else None,
+            "cache_ttl_seconds": rpa_config.cache_ttl.total_seconds(), # <-- MODIFICATION (C1-9) : .total_seconds()
+            "products_by_insurer": products_by_insurer
+        },
+        metrics={
+            "total_requests": int(rpa_requests_total._value.get()),
+            "successful_requests": int(rpa_success_total._value.get()),
+            "failed_requests": int(rpa_failures_total._value.get())
+        },
+        available_scrapers={
+            "Allianz Maroc": True,  # From config file
+            "Atlanta Sanad": False,  # To be added
+            "AXA Assurance Maroc": False,
+            "RMA Watanya": False,
+            "Sanlam": False,
+            "Wafa Assurance": False
+        }
+    )
+
+@app.post("/rpa/reload-config", response_model=RPAReloadResponse)
+async def rpa_reload_config_endpoint(
+    request: ConfigReloadRequest, # <-- MODIFICATION (C1-9)
+    username: str = Depends(verify_basic_auth)
+):
+    """Reload RPA configurations from YAML files"""
+    if not RPA_MODULE_LOADED:
+        raise HTTPException(
+            status_code=503,
+            detail="RPA module not available"
+        )
+    
+    logger.info(f"🤖 [RPA] Config reload requested by {username} (force={request.force})") # <-- MODIFICATION (C1-9)
+    
+    try:
+        old_count = len(rpa_config.list_insurers())
+        errors = rpa_config.load_all_configs(force=request.force) # <-- MODIFICATION (C1-9)
+        new_count = len(rpa_config.list_insurers())
+        
+        return RPAReloadResponse(
+            success=True,
+            message=f"Reloaded {new_count} configurations (was {old_count})",
+            configs_loaded=new_count,
+            insurers=rpa_config.list_insurers(),
+            errors=[] # errors n'est pas retourné par load_all_configs dans votre code
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ [RPA] Config reload failed: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Config reload failed: {str(e)}"
+        )
+
+@app.get("/metrics/prometheus")
+async def prometheus_metrics(username: str = Depends(verify_basic_auth)):
+    return Response(generate_latest(), media_type="text/plain")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await callback_manager.close()
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

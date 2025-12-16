@@ -1,0 +1,11 @@
+fastapi
+uvicorn[standard]
+httpx
+pdf2image
+python-docx
+openpyxl
+python-multipart
+python-pptx
+google-cloud-vision
+celery
+redis

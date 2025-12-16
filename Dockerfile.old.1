@@ -1,0 +1,14 @@
+FROM mcr.microsoft.com/playwright/python:v1.54.0-jammy
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# (les navigateurs Playwright sont déjà dans cette image)
+# Si un jour tu changes d’image de base, il faudra peut-être :
+# RUN playwright install --with-deps chromium
+
+COPY . .
+EXPOSE 30001
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "11235"]
+

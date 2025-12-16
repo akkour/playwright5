@@ -1,0 +1,138 @@
+"""EvaRAG Admin Dashboard - Minimal Version"""
+import os
+import json
+import asyncio
+from datetime import datetime
+from typing import List, Dict, Any
+from pathlib import Path
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, status
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.responses import HTMLResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import secrets
+import httpx
+
+ADMIN_USER = os.getenv("ADMIN_USER", "admin")
+ADMIN_PASS = os.getenv("ADMIN_PASS", "Hg.54.uyt.$$!!.xcv")
+PROJECT_DIR = os.getenv("PROJECT_DIR", "/workspace")
+
+SERVICES = {
+    "playwright-crawler": {"name": "Playwright Crawler", "color": "#4CAF50"},
+    "document-processor-web": {"name": "Document Processor", "color": "#2196F3"},
+    "document-processor-worker": {"name": "Celery Worker", "color": "#FF9800"},
+    "ocr-service": {"name": "OCR Service", "color": "#9C27B0"},
+    "easyocr-service": {"name": "EasyOCR Service", "color": "#E91E63"},
+    "redis": {"name": "Redis", "color": "#F44336"}
+}
+
+app = FastAPI(title="EvaRAG Admin Dashboard")
+security = HTTPBasic()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+manager = ConnectionManager()
+
+class ServiceAction(BaseModel):
+    service: str
+    action: str
+
+def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
+    correct_username = secrets.compare_digest(credentials.username, ADMIN_USER)
+    correct_password = secrets.compare_digest(credentials.password, ADMIN_PASS)
+    if not (correct_username and correct_password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect", headers={"WWW-Authenticate": "Basic"})
+    return credentials.username
+
+async def run_docker_command(command: List[str]) -> Dict[str, Any]:
+    try:
+        process = await asyncio.create_subprocess_exec(*command, cwd=PROJECT_DIR, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, stderr = await process.communicate()
+        return {"success": process.returncode == 0, "stdout": stdout.decode(), "stderr": stderr.decode()}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+async def get_service_status() -> List[Dict[str, Any]]:
+    result = await run_docker_command(["docker", "compose", "ps", "--format", "json"])
+    if not result["success"]:
+        return []
+    services = []
+    for line in result["stdout"].strip().split('\n'):
+        if line:
+            try:
+                data = json.loads(line)
+                name = data.get("Service", data.get("Name", "unknown"))
+                services.append({
+                    "name": name,
+                    "display_name": SERVICES.get(name, {}).get("name", name),
+                    "state": data.get("State", "unknown"),
+                    "color": SERVICES.get(name, {}).get("color", "#607D8B")
+                })
+            except:
+                pass
+    return services
+
+async def get_docker_stats() -> List[Dict[str, Any]]:
+    result = await run_docker_command(["docker", "stats", "--no-stream", "--format", "{{json .}}"])
+    if not result["success"]:
+        return []
+    stats = []
+    for line in result["stdout"].strip().split('\n'):
+        if line:
+            try:
+                stat = json.loads(line)
+                stats.append({"name": stat.get("Name", ""), "cpu": stat.get("CPUPerc", "0%"), "memory": stat.get("MemUsage", "0B")})
+            except:
+                pass
+    return stats
+
+@app.get("/")
+async def index():
+    html = Path(__file__).parent / "templates" / "index.html"
+    if html.exists():
+        return HTMLResponse(content=html.read_text())
+    return HTMLResponse("<h1>Dashboard</h1><p>Template not found</p>")
+
+@app.get("/api/services")
+async def get_services(username: str = Depends(verify_credentials)):
+    services = await get_service_status()
+    return {"services": services}
+
+@app.get("/api/stats")
+async def get_stats(username: str = Depends(verify_credentials)):
+    stats = await get_docker_stats()
+    return {"stats": stats}
+
+@app.post("/api/service/action")
+async def service_action(action: ServiceAction, username: str = Depends(verify_credentials)):
+    if action.action == "logs":
+        result = await run_docker_command(["docker", "compose", "logs", "--tail=50", action.service])
+        return {"success": result["success"], "logs": result["stdout"]}
+    result = await run_docker_command(["docker", "compose", action.action, action.service])
+    return {"success": result["success"], "message": f"Action executed"}
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            services = await get_service_status()
+            stats = await get_docker_stats()
+            await websocket.send_json({"type": "update", "timestamp": datetime.now().isoformat(), "data": {"services": services, "stats": stats}})
+            await asyncio.sleep(5)
+    except:
+        manager.disconnect(websocket)
+
+@app.get("/api/health")
+async def health():
+    return {"status": "healthy"}

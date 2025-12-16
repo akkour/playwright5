@@ -1,0 +1,415 @@
+import os
+import json
+import asyncio
+from pathlib import Path
+from typing import List, Dict, Any
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status
+from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+import secrets
+
+import resend
+from datetime import datetime, timedelta
+
+
+# Configuration
+ADMIN_USER = os.getenv("ADMIN_USER", "admin")
+ADMIN_PASS = os.getenv("ADMIN_PASS", "admin")
+PROJECT_DIR = os.getenv("PROJECT_DIR", "/workspace")
+
+# Services configuration
+SERVICES = {
+    "admin-dashboard": {"name": "Admin Dashboard", "color": "#2196F3"},
+    "playwright-crawler": {"name": "Playwright Crawler", "color": "#4CAF50"},
+    "document-processor-web": {"name": "Document Processor", "color": "#FF9800"},
+    "document-processor-worker": {"name": "Celery Worker", "color": "#9C27B0"},
+    "redis": {"name": "Redis", "color": "#f44336"},
+    "ocr-service": {"name": "OCR Service", "color": "#3F51B5"},
+    "easyocr-service": {"name": "EasyOCR Service", "color": "#009688"},
+    "browserless-browserless-1": {"name": "browserless-browserless", "color": "#607D8B"},
+}
+
+# ==========================================
+# EMAIL ALERTS CONFIGURATION (Resend)
+# ==========================================
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+ALERT_EMAIL_FROM = os.getenv("ALERT_EMAIL_FROM", "onboarding@resend.dev")
+ALERT_EMAIL_TO = os.getenv("ALERT_EMAIL_TO", "")
+ALERT_COOLDOWN = int(os.getenv("ALERT_COOLDOWN", "300"))
+
+# Initialiser Resend
+if RESEND_API_KEY:
+    resend.api_key = RESEND_API_KEY
+
+# Stockage des alertes
+alert_history: Dict[str, datetime] = {}
+previous_service_states: Dict[str, str] = {}
+
+app = FastAPI(title="EvaRAG Admin Dashboard")
+security = HTTPBasic()
+
+# Authentication
+def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
+    correct_username = secrets.compare_digest(credentials.username, ADMIN_USER)
+    correct_password = secrets.compare_digest(credentials.password, ADMIN_PASS)
+
+    if not (correct_username and correct_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
+
+# Docker command execution
+async def run_docker_command(cmd: List[str]) -> Dict[str, Any]:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        return {
+            "success": process.returncode == 0,
+            "stdout": stdout.decode(),
+            "stderr": stderr.decode(),
+            "returncode": process.returncode
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": str(e),
+            "returncode": -1
+        }
+
+# Get service status
+async def get_service_status() -> List[Dict[str, Any]]:
+    # Utiliser docker ps directement
+    result = await run_docker_command(["docker", "ps", "-a", "--format", "{{json .}}"])
+    if not result["success"]:
+        return []
+
+    services = []
+    for line in result["stdout"].strip().split('\n'):
+        if line:
+            try:
+                data = json.loads(line)
+                name = data.get("Names", "")
+
+                # Mapper le status Docker
+                status = data.get("Status", "")
+                state = data.get("State", "")
+
+                if state == "running":
+                    state_clean = "running"
+                elif state == "restarting":
+                    state_clean = "restarting"
+                elif state == "exited":
+                    state_clean = "stopped"
+                else:
+                    state_clean = state
+
+                # Extraire le nom du service depuis le nom du container
+                service_name = name.replace("playwright-crawler-", "").replace("-1", "")
+                display_name = SERVICES.get(service_name, {}).get("name", name)
+
+                services.append({
+                    "name": service_name,
+                    "display_name": display_name,
+                    "state": state_clean,
+                    "status": status,
+                    "color": SERVICES.get(service_name, {}).get("color", "#607D8B")
+                })
+            except:
+                pass
+
+    return services
+
+# Get resource usage
+async def get_resource_usage() -> List[Dict[str, Any]]:
+    result = await run_docker_command(["docker", "stats", "--no-stream", "--format", "{{json .}}"])
+    if not result["success"]:
+        return []
+
+    resources = []
+    for line in result["stdout"].strip().split('\n'):
+        if line:
+            try:
+                data = json.loads(line)
+                resources.append({
+                    "name": data.get("Name", ""),
+                    "cpu": data.get("CPUPerc", "0%"),
+                    "memory": data.get("MemUsage", "0B / 0B")
+                })
+            except:
+                pass
+
+    return resources
+
+# ==========================================
+# EMAIL ALERTS SYSTEM (Resend)
+# ==========================================
+
+async def send_email_alert(service_name: str, status: str, previous_status: str):
+    """Envoyer une alerte email via Resend quand un service change d'état"""
+    if not RESEND_API_KEY or not ALERT_EMAIL_TO:
+        print("⚠️ Email alerts not configured (missing RESEND_API_KEY or ALERT_EMAIL_TO)")
+        return
+    
+    # Cooldown : ne pas re-alerter trop vite
+    now = datetime.now()
+    last_alert = alert_history.get(service_name)
+    if last_alert and (now - last_alert).seconds < ALERT_COOLDOWN:
+        return
+    
+    try:
+        # Get display name
+        display_name = SERVICES.get(service_name, {}).get("name", service_name)
+        
+        # Template HTML professionnel
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        </head>
+        <body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;">
+            <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                <!-- Header -->
+                <div style="background: linear-gradient(135deg, #f44336 0%, #e53935 100%); color: white; padding: 25px; border-radius: 10px 10px 0 0; text-align: center;">
+                    <h1 style="margin: 0; font-size: 24px;">🚨 Service Alert</h1>
+                    <p style="margin: 5px 0 0 0; opacity: 0.9;">EvaRAG Infrastructure Monitoring</p>
+                </div>
+                
+                <!-- Content -->
+                <div style="background: white; padding: 30px; border: 1px solid #e0e0e0; border-top: none; border-radius: 0 0 10px 10px;">
+                    <div style="background: #fff3cd; border-left: 4px solid #ff9800; padding: 15px; margin-bottom: 20px; border-radius: 4px;">
+                        <p style="margin: 0; color: #856404; font-weight: 600;">A service has changed status and requires attention</p>
+                    </div>
+                    
+                    <table style="width: 100%; border-collapse: collapse;">
+                        <tr>
+                            <td style="padding: 12px 0; border-bottom: 1px solid #f0f0f0;"><strong>Service Name:</strong></td>
+                            <td style="padding: 12px 0; border-bottom: 1px solid #f0f0f0; text-align: right;">{display_name}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 12px 0; border-bottom: 1px solid #f0f0f0;"><strong>Current Status:</strong></td>
+                            <td style="padding: 12px 0; border-bottom: 1px solid #f0f0f0; text-align: right;">
+                                <span style="background: #f44336; color: white; padding: 4px 12px; border-radius: 12px; font-weight: 600; font-size: 12px; text-transform: uppercase;">{status}</span>
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 12px 0; border-bottom: 1px solid #f0f0f0;"><strong>Previous Status:</strong></td>
+                            <td style="padding: 12px 0; border-bottom: 1px solid #f0f0f0; text-align: right;">{previous_status}</td>
+                        </tr>
+                        <tr>
+                            <td style="padding: 12px 0;"><strong>Timestamp:</strong></td>
+                            <td style="padding: 12px 0; text-align: right;">{now.strftime('%Y-%m-%d %H:%M:%S UTC')}</td>
+                        </tr>
+                    </table>
+                    
+                    <!-- Action Button -->
+                    <div style="margin-top: 30px; text-align: center;">
+                        <a href="https://admin.evaleads.com" style="display: inline-block; background: #2196F3; color: white; padding: 14px 32px; text-decoration: none; border-radius: 6px; font-weight: 600; font-size: 14px;">
+                            🎛️ Open Dashboard
+                        </a>
+                    </div>
+                    
+                    <!-- Footer -->
+                    <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e0e0e0; text-align: center; color: #666; font-size: 12px;">
+                        <p style="margin: 0;">This is an automated alert from <strong>EvaRAG Admin Dashboard</strong></p>
+                        <p style="margin: 5px 0 0 0;">To manage services, visit the dashboard and use Start/Stop/Restart buttons</p>
+                    </div>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        # Envoyer via Resend API
+        params = {
+            "from": ALERT_EMAIL_FROM,
+            "to": [ALERT_EMAIL_TO],
+            "subject": f"🚨 ALERT: {display_name} - {status.upper()}",
+            "html": html_content,
+        }
+        
+        email = resend.Emails.send(params)
+        
+        # Enregistrer l'alerte
+        alert_history[service_name] = now
+        print(f"📧 Email alert sent via Resend for {service_name}: {status} (ID: {email.get('id')})")
+        
+    except Exception as e:
+        print(f"❌ Failed to send Resend email alert: {e}")
+
+async def check_service_changes(services: List[Dict[str, Any]]):
+    """Vérifier les changements d'état des services"""
+    for service in services:
+        name = service.get("name")
+        state = service.get("state")
+        
+        if name in previous_service_states:
+            previous_state = previous_service_states[name]
+            
+            # Détecter les changements critiques
+            if previous_state == "running" and state in ["stopped", "exited"]:
+                # Service vient de tomber !
+                await send_email_alert(name, state, previous_state)
+            elif previous_state in ["stopped", "exited"] and state == "running":
+                # Service revenu (email de récupération optionnel)
+                # await send_recovery_alert(name, state, previous_state)
+                pass
+        
+        # Mémoriser l'état actuel
+        previous_service_states[name] = state
+
+# ==========================================
+# WEBSOCKET ENDPOINT (avec alertes)
+# ==========================================
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            services = await get_service_status()
+            resources = await get_resource_usage()
+            
+            # Vérifier les changements d'état (non-bloquant)
+            try:
+                await check_service_changes(services)
+            except Exception as e:
+                print(f"⚠️ Alert check error: {e}")
+            
+            # Envoyer les données au client
+            try:
+                await websocket.send_json({
+                    "services": services,
+                    "resources": resources
+                })
+            except Exception as e:
+                print(f"⚠️ WebSocket send error: {e}")
+                break
+            
+            await asyncio.sleep(5)
+    except WebSocketDisconnect:
+        print("ℹ️ WebSocket disconnected")
+    except Exception as e:
+        print(f"❌ WebSocket error: {e}")
+# Main page
+@app.get("/")
+async def index(username: str = Depends(verify_credentials)):
+    html = Path(__file__).parent / "templates" / "index.html"
+    if html.exists():
+        return HTMLResponse(content=html.read_text())
+    return HTMLResponse("<h1>Dashboard</h1><p>Template not found</p>")
+
+# Health check
+@app.get("/api/health")
+async def health():
+    return {"status": "healthy"}
+
+# ==========================================
+# ACTIONS SUR LES SERVICES
+# ==========================================
+
+@app.post("/api/service/{service_name}/start")
+async def start_service(service_name: str, username: str = Depends(verify_credentials)):
+    """Démarrer un service"""
+    try:
+        result = await run_docker_command([
+            "docker", "compose", "-f", f"{PROJECT_DIR}/docker-compose.yml",
+            "start", service_name
+        ])
+        if result["success"]:
+            return {
+                "success": True,
+                "message": f"Service '{service_name}' démarré avec succès",
+                "service": service_name,
+                "action": "start"
+            }
+        else:
+            raise HTTPException(status_code=500, detail=result["stderr"])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/service/{service_name}/stop")
+async def stop_service(service_name: str, username: str = Depends(verify_credentials)):
+    """Arrêter un service"""
+    try:
+        result = await run_docker_command([
+            "docker", "compose", "-f", f"{PROJECT_DIR}/docker-compose.yml",
+            "stop", service_name
+        ])
+        if result["success"]:
+            return {
+                "success": True,
+                "message": f"Service '{service_name}' arrêté avec succès",
+                "service": service_name,
+                "action": "stop"
+            }
+        else:
+            raise HTTPException(status_code=500, detail=result["stderr"])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/service/{service_name}/restart")
+async def restart_service(service_name: str, username: str = Depends(verify_credentials)):
+    """Redémarrer un service"""
+    try:
+        result = await run_docker_command([
+            "docker", "compose", "-f", f"{PROJECT_DIR}/docker-compose.yml",
+            "restart", service_name
+        ])
+        if result["success"]:
+            return {
+                "success": True,
+                "message": f"Service '{service_name}' redémarré avec succès",
+                "service": service_name,
+                "action": "restart"
+            }
+        else:
+            raise HTTPException(status_code=500, detail=result["stderr"])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# LOGS DES SERVICES
+# ==========================================
+@app.get("/api/service/{service_name}/logs")
+async def get_service_logs(
+    service_name: str,
+    lines: int = 50,
+    username: str = Depends(verify_credentials)
+):
+    """Récupérer les logs d'un service"""
+    try:
+        # Limiter le nombre de lignes entre 10 et 1000
+        lines = max(10, min(lines, 1000))
+
+        # Les containers n'ont PAS de préfixe, utiliser le nom direct
+        result = await run_docker_command([
+            "docker", "logs", "--tail", str(lines), service_name
+        ])
+
+        if result["success"]:
+            # Combiner stdout et stderr
+            logs = result["stdout"]
+            if result["stderr"]:
+                logs = logs + "\n" + result["stderr"]
+
+            return {
+                "success": True,
+                "service": service_name,
+                "lines": lines,
+                "logs": logs if logs else "Aucun log disponible"
+            }
+        else:
+            raise HTTPException(status_code=500, detail=result["stderr"])
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

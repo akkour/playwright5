@@ -1,0 +1,298 @@
+# =============================================================================
+# ACHEEL MRH - Configuration RPA pour assurance habitation
+# =============================================================================
+# Assureur: Acheel (néo-assureur français 100% digital)
+# Produit: Multirisque Habitation (MRH)
+# URL: https://www.acheel.com/subscribe/mrh
+# Authentification: Non requise (simulateur public)
+# =============================================================================
+
+insurer_name: "Acheel"
+insurer_code: "acheel"
+country: "FR"
+market: "B2C"
+is_active: true
+
+# URLs
+base_url: "https://www.acheel.com"
+mrh_url: "https://www.acheel.com/subscribe/mrh"
+
+# Configuration Playwright
+browser_config:
+  headless: true
+  viewport:
+    width: 1920
+    height: 1080
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# Timeouts
+timeouts:
+  navigation: 30000
+  element: 10000
+  animation: 2000
+
+# Cookie consent provider
+cookie_consent:
+  provider: "didomi"
+  selectors:
+    - "button:has-text('Accepter')"
+    - "button:has-text('Accepter & Fermer')"
+    - "button:has-text('Tout accepter')"
+    - "#didomi-notice-agree-button"
+    - "[aria-label='Accepter & Fermer']"
+
+# =============================================================================
+# WORKFLOW: Assurance Habitation (MRH)
+# =============================================================================
+workflows:
+  mrh:
+    name: "Devis Assurance Habitation"
+    product_code: "mrh"
+    description: "Simulation assurance multirisque habitation Acheel"
+    complexity: "simple"
+    estimated_duration: 60
+    rating: 4.5
+    
+    steps:
+      # =========================================================================
+      # ÉTAPE 1: Navigation vers le simulateur MRH
+      # =========================================================================
+      - step: "navigate"
+        name: "Accès au simulateur MRH"
+        action: "navigate"
+        url: "https://www.acheel.com/subscribe/mrh"
+        wait_until: "networkidle"
+        timeout: 30000
+
+      # =========================================================================
+      # ÉTAPE 2: Gestion cookie consent (Didomi)
+      # =========================================================================
+      - step: "cookie_consent"
+        name: "Acceptation cookies"
+        action: "click"
+        selectors:
+          - "button:has-text('Accepter & Fermer')"
+          - "button:has-text('Accepter')"
+          - "#didomi-notice-agree-button"
+        optional: true
+        timeout: 5000
+        wait_after: 1000
+
+      # =========================================================================
+      # ÉTAPE 3: Type de logement
+      # =========================================================================
+      - step: "housing_type"
+        name: "Sélection type de logement"
+        action: "click"
+        selector: "button:has-text('Appartement')"
+        fallback_selectors:
+          - "[data-testid='housing-type-apartment']"
+          - "div:has-text('Appartement')"
+        wait_after: 1000
+        description: "Sélectionne Appartement ou Maison"
+
+      # =========================================================================
+      # ÉTAPE 4: Statut occupant
+      # =========================================================================
+      - step: "occupant_status"
+        name: "Sélection statut occupant"
+        action: "click"
+        selector: "button:has-text('Locataire')"
+        fallback_selectors:
+          - "[data-testid='occupant-tenant']"
+          - "div:has-text('Locataire')"
+        wait_after: 1000
+        description: "Sélectionne Locataire ou Propriétaire"
+
+      # =========================================================================
+      # ÉTAPE 5: Nombre de pièces
+      # =========================================================================
+      - step: "rooms_count"
+        name: "Sélection nombre de pièces"
+        action: "click"
+        selector: "button:has-text('3')"
+        fallback_selectors:
+          - "[data-testid='rooms-3']"
+          - "button:has-text('3 pièces')"
+        wait_after: 1000
+        description: "Nombre de pièces principales"
+
+      # =========================================================================
+      # ÉTAPE 6: Surface du logement
+      # =========================================================================
+      - step: "surface"
+        name: "Saisie surface"
+        action: "fill"
+        selector: "input[type='number']"
+        fallback_selectors:
+          - "input[placeholder*='surface']"
+          - "input[name='surface']"
+          - "[data-testid='surface-input']"
+        value: "{{form_data.surface}}"
+        default: "65"
+        wait_after: 500
+
+      # =========================================================================
+      # ÉTAPE 7: Code postal
+      # =========================================================================
+      - step: "postal_code"
+        name: "Saisie code postal"
+        action: "fill"
+        selector: "input[placeholder*='postal']"
+        fallback_selectors:
+          - "input[name='postalCode']"
+          - "input[name='zipCode']"
+          - "[data-testid='postal-code-input']"
+        value: "{{form_data.code_postal}}"
+        default: "75020"
+        press_enter: false
+        wait_after: 1500
+
+      # =========================================================================
+      # ÉTAPE 8: Sélection ville (autocomplete)
+      # =========================================================================
+      - step: "city_select"
+        name: "Sélection ville"
+        action: "click"
+        selector: "li:first-child"
+        fallback_selectors:
+          - "[role='option']:first-child"
+          - ".autocomplete-item:first-child"
+        optional: true
+        wait_after: 1000
+
+      # =========================================================================
+      # ÉTAPE 9: Valeur des biens mobiliers
+      # =========================================================================
+      - step: "assets_value"
+        name: "Valeur des biens"
+        action: "click"
+        selector: "button:has-text('15 000')"
+        fallback_selectors:
+          - "button:has-text('15000')"
+          - "[data-testid='assets-15000']"
+          - "button:has-text('Entre 10 000')"
+        optional: true
+        wait_after: 1000
+
+      # =========================================================================
+      # ÉTAPE 10: Bouton Continuer / Suivant
+      # =========================================================================
+      - step: "continue_1"
+        name: "Continuer vers étape suivante"
+        action: "click"
+        selector: "button:has-text('Continuer')"
+        fallback_selectors:
+          - "button:has-text('Suivant')"
+          - "button[type='submit']"
+          - "[data-testid='continue-button']"
+        wait_after: 2000
+
+      # =========================================================================
+      # ÉTAPE 11: Date d'effet (si demandée)
+      # =========================================================================
+      - step: "effect_date"
+        name: "Date d'effet du contrat"
+        action: "fill"
+        selector: "input[type='date']"
+        fallback_selectors:
+          - "input[name='effectDate']"
+          - "input[placeholder*='date']"
+        value: "{{form_data.date_effet}}"
+        default: "{{tomorrow}}"
+        optional: true
+        wait_after: 1000
+
+      # =========================================================================
+      # ÉTAPE 12: Continuer vers les garanties
+      # =========================================================================
+      - step: "continue_2"
+        name: "Continuer vers garanties"
+        action: "click"
+        selector: "button:has-text('Continuer')"
+        fallback_selectors:
+          - "button:has-text('Voir les offres')"
+          - "button:has-text('Obtenir mon tarif')"
+        optional: true
+        wait_after: 3000
+
+      # =========================================================================
+      # ÉTAPE 13: Screenshot des tarifs
+      # =========================================================================
+      - step: "screenshot_prices"
+        name: "Capture des tarifs"
+        action: "screenshot"
+        filename: "acheel_mrh_tarifs"
+        wait_after: 1000
+
+      # =========================================================================
+      # ÉTAPE 14: Extraction des prix
+      # =========================================================================
+      - step: "extract_prices"
+        name: "Extraction des tarifs"
+        action: "extract"
+        fields:
+          - name: "price_monthly_standard"
+            selectors:
+              - ".price-standard"
+              - "[data-testid='price-standard']"
+              - "div:has-text('Standard') + div .price"
+              - "text=/\\d+[,.]\\d{2}\\s*€/"
+            type: "price"
+          
+          - name: "price_monthly_premium"
+            selectors:
+              - ".price-premium"
+              - "[data-testid='price-premium']"
+              - "div:has-text('Premium') + div .price"
+            type: "price"
+          
+          - name: "formulas"
+            selector: "[class*='formula'], [class*='offer'], [class*='card']"
+            multiple: true
+            fields:
+              - name: "name"
+                selector: "h2, h3, .title"
+              - name: "price"
+                selector: ".price, [class*='price']"
+              - name: "description"
+                selector: "p, .description"
+
+# =============================================================================
+# Données de test par défaut
+# =============================================================================
+test_data:
+  housing_type: "appartement"
+  occupant_status: "locataire"
+  rooms: 3
+  surface: 65
+  code_postal: "75020"
+  city: "Paris"
+  assets_value: 15000
+  date_effet: "{{tomorrow}}"
+
+# =============================================================================
+# Mapping des champs
+# =============================================================================
+field_mapping:
+  housing_type: "Type de logement (appartement/maison)"
+  occupant_status: "Statut (locataire/propriétaire)"
+  rooms: "Nombre de pièces principales"
+  surface: "Surface en m²"
+  postal_code: "Code postal"
+  assets_value: "Valeur du mobilier à assurer"
+
+# =============================================================================
+# Gestion des erreurs
+# =============================================================================
+error_handling:
+  retry:
+    max_attempts: 3
+    delay: 2000
+  
+  screenshots_on_error: true
+  
+  fallback_actions:
+    cookie_modal:
+      action: "execute_js"
+      script: "document.querySelector('#didomi-notice-agree-button')?.click()"

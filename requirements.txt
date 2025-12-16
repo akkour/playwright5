@@ -1,0 +1,21 @@
+# Web & API
+fastapi>=0.100,<0.116
+uvicorn[standard]>=0.23,<0.30
+
+# Crawler
+playwright==1.54.0
+httpx>=0.24,<0.28
+beautifulsoup4>=4.12,<5
+lxml==5.2.2
+aiofiles>=23,<24
+readability-lxml==0.8.1
+tldextract==5.1.2
+sse-starlette==1.6.5
+# Monitoring / Metrics / Système
+prometheus-client>=0.20,<1
+psutil>=5.9,<6
+pydantic==2.11.0
+# Cache Redis (client Python async)
+redis>=5.0,<6
+
+resend

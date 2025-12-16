@@ -1,0 +1,559 @@
+# =============================================================================
+# ZEPHIR AUTO - v44 (Basé sur v42 qui fonctionne + extraction enrichie)
+# =============================================================================
+insurer_name: "Zephir"
+base_url: "https://zeole.zephir.fr"
+country: "FR"
+complexity: 5
+rating: 4.0
+
+browser:
+  headless: true
+  timeout: 90000
+  viewport:
+    width: 1830
+    height: 1138
+
+retry:
+  max_retries: 1
+  retry_delay: 2000
+
+workflows:
+  auto:
+    name: "Devis Assurance Auto"
+    product_code: "auto"
+    steps:
+      # PHASE 1: AUTHENTIFICATION
+      - action: navigate
+        url: "https://zeole.zephir.fr/authentification/login"
+        wait_after: 3000
+
+      - action: click
+        selector: "z-input:nth-of-type(1) input"
+        timeout: 10000
+        wait_after: 300
+
+      - action: type
+        selector: "z-input:nth-of-type(1) input"
+        text: "I18103"
+        wait_after: 300
+
+      - action: click
+        selector: "z-input:nth-of-type(2) input"
+        timeout: 5000
+        wait_after: 300
+
+      - action: type
+        selector: "z-input:nth-of-type(2) input"
+        text: "28JuilletVacance"
+        wait_after: 500
+
+      - action: click
+        selector: "div.container-formulaire span.mat-button-wrapper"
+        timeout: 10000
+        wait_after: 5000
+
+      # PHASE 2: TARIFICATEUR
+      - action: execute_js
+        script: |
+          (function() {
+            var el = document.evaluate("//text()[contains(.,'Tarificateur')]/parent::*", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+            if (el) { el.click(); return 'clicked'; }
+            return 'not found';
+          })();
+        wait_after: 3000
+
+      - action: click
+        selector: "app-menu-tarification-produits > div > div:nth-of-type(1) button"
+        timeout: 15000
+        wait_after: 2000
+
+      # PHASE 3: IMMATRICULATION
+      - action: click
+        selector: "#immat"
+        timeout: 10000
+        wait_after: 300
+
+      - action: type
+        selector: "#immat"
+        text: "EW137XR"
+        wait_after: 500
+
+      - action: click
+        selector: "app-recherche-vehicule > div > form span.mat-button-wrapper"
+        timeout: 10000
+        wait_after: 5000
+
+      # PHASE 4: PAGE VÉHICULE
+      - action: wait_for
+        selector: "#mat-input-1"
+        timeout: 10000
+
+      - action: click
+        selector: "#mat-input-1"
+        timeout: 5000
+        wait_after: 300
+
+      - action: type
+        selector: "#mat-input-1"
+        text: "30012025"
+        wait_after: 500
+
+      - action: click
+        selector: "#codePostal"
+        timeout: 10000
+        wait_after: 300
+
+      - action: type
+        selector: "#codePostal"
+        text: "44000"
+        wait_after: 1500
+
+      - action: click
+        selector: "div.cdk-overlay-container span"
+        timeout: 5000
+        wait_after: 1000
+
+      - action: click
+        selector: "#mat-button-toggle-2 span > span"
+        timeout: 5000
+        wait_after: 300
+
+      - action: execute_js
+        script: |
+          (function() {
+            var csp = document.querySelector('#csp');
+            if (csp) {
+              for (var i = 0; i < csp.options.length; i++) {
+                if (csp.options[i].text.toLowerCase().indexOf('non s') > -1) {
+                  csp.selectedIndex = i;
+                  csp.dispatchEvent(new Event('change', {bubbles: true}));
+                  return 'CSP: ' + csp.options[i].text;
+                }
+              }
+            }
+            return 'CSP not found';
+          })();
+        wait_after: 500
+
+      - action: execute_js
+        script: |
+          (function() {
+            var usage = document.querySelector('#usage');
+            if (usage) {
+              for (var i = 0; i < usage.options.length; i++) {
+                var val = usage.options[i].value;
+                var txt = usage.options[i].text;
+                if (val === 'SD' || txt.toLowerCase().indexOf('priv') > -1) {
+                  usage.selectedIndex = i;
+                  usage.dispatchEvent(new Event('change', {bubbles: true}));
+                  return 'Usage: ' + txt;
+                }
+              }
+            }
+            return 'Usage not found';
+          })();
+        wait_after: 500
+
+      - action: click
+        selector: "#mat-button-toggle-9 span > span"
+        timeout: 5000
+        wait_after: 300
+
+      - action: click
+        selector: "#mat-button-toggle-11 span > span"
+        timeout: 5000
+        wait_after: 500
+
+      # SUIVANT VÉHICULE
+      - action: execute_js
+        script: |
+          (function() {
+            var btns = document.querySelectorAll('button');
+            for (var i = 0; i < btns.length; i++) {
+              if (btns[i].textContent && btns[i].textContent.indexOf('Suivant') > -1) {
+                btns[i].click();
+                return 'Suivant clicked';
+              }
+            }
+            return 'Suivant not found';
+          })();
+        wait_after: 5000
+
+      # PHASE 5: CONDUCTEUR
+      - action: wait_for
+        selector: "app-identite-cnd div:nth-of-type(2) > select"
+        timeout: 10000
+
+      - action: execute_js
+        script: |
+          (function() {
+            var sel = document.querySelector('app-identite-cnd div:nth-of-type(2) > select');
+            if (sel) {
+              for (var i = 0; i < sel.options.length; i++) {
+                if (sel.options[i].text.indexOf('Monsieur') > -1) {
+                  sel.selectedIndex = i;
+                  sel.dispatchEvent(new Event('change', {bubbles: true}));
+                  return 'Civilite: Monsieur';
+                }
+              }
+            }
+            return 'Civilite not found';
+          })();
+        wait_after: 300
+
+      - action: click
+        selector: "app-identite-cnd div:nth-of-type(3) > input"
+        timeout: 5000
+        wait_after: 200
+
+      - action: type
+        selector: "app-identite-cnd div:nth-of-type(3) > input"
+        text: "DUPONT"
+        wait_after: 300
+
+      - action: click
+        selector: "app-identite-cnd div:nth-of-type(4) > input"
+        timeout: 5000
+        wait_after: 200
+
+      - action: type
+        selector: "app-identite-cnd div:nth-of-type(4) > input"
+        text: "CHARLES"
+        wait_after: 300
+
+      - action: execute_js
+        script: |
+          (function() {
+            var sel = document.querySelector('app-identite-cnd div:nth-of-type(5) > select');
+            if (sel) {
+              for (var i = 0; i < sel.options.length; i++) {
+                if (sel.options[i].value === 'M') {
+                  sel.selectedIndex = i;
+                  sel.dispatchEvent(new Event('change', {bubbles: true}));
+                  return 'Situation: Marié';
+                }
+              }
+            }
+            return 'Situation not found';
+          })();
+        wait_after: 300
+
+      - action: click
+        selector: "#mat-input-2"
+        timeout: 5000
+        wait_after: 200
+
+      - action: type
+        selector: "#mat-input-2"
+        text: "09101967"
+        wait_after: 300
+
+      - action: click
+        selector: "#mat-input-4"
+        timeout: 5000
+        wait_after: 200
+
+      - action: type
+        selector: "#mat-input-4"
+        text: "13011996"
+        wait_after: 300
+
+      - action: click
+        selector: "div:nth-of-type(2) > input"
+        timeout: 5000
+        wait_after: 200
+
+      - action: type
+        selector: "div:nth-of-type(2) > input"
+        text: "64538467"
+        wait_after: 300
+
+      - action: click
+        selector: "z-departement input"
+        timeout: 5000
+        wait_after: 300
+
+      - action: type
+        selector: "z-departement input"
+        text: "44"
+        wait_after: 1500
+
+      - action: click
+        selector: "div.cdk-overlay-container span span:nth-of-type(1)"
+        timeout: 5000
+        wait_after: 1000
+
+      - action: execute_js
+        script: |
+          (function() {
+            var sel = document.querySelector('permis-layout > div > div > div:nth-of-type(1) select');
+            if (sel) {
+              for (var i = 0; i < sel.options.length; i++) {
+                if (sel.options[i].text.indexOf('NANTES') > -1) {
+                  sel.selectedIndex = i;
+                  sel.dispatchEvent(new Event('change', {bubbles: true}));
+                  return 'Ville: NANTES';
+                }
+              }
+            }
+            return 'Ville not found';
+          })();
+        wait_after: 300
+
+      - action: click
+        selector: "div > div > div:nth-of-type(2) input"
+        timeout: 5000
+        wait_after: 200
+
+      - action: type
+        selector: "div > div > div:nth-of-type(2) input"
+        text: "1"
+        wait_after: 300
+
+      - action: click
+        selector: "#assureDepuis"
+        timeout: 5000
+        wait_after: 200
+
+      - action: type
+        selector: "#assureDepuis"
+        text: "36"
+        wait_after: 500
+
+      - action: click
+        selector: "#mat-button-toggle-16-button > span"
+        timeout: 5000
+        wait_after: 300
+
+      - action: click
+        selector: "#mat-button-toggle-18 span > span"
+        timeout: 5000
+        wait_after: 300
+
+      - action: click
+        selector: "#mat-button-toggle-20 span > span"
+        timeout: 5000
+        wait_after: 500
+
+      # SUIVANT CONDUCTEUR
+      - action: click
+        selector: "#main div:nth-of-type(2) > div > button"
+        timeout: 10000
+        wait_after: 2000
+
+      - action: click
+        selector: "#main div:nth-of-type(2) > div span.mat-button-wrapper"
+        timeout: 5000
+        wait_after: 2000
+
+      - action: click
+        selector: "#boutonModalSubmit > span.mat-button-wrapper"
+        timeout: 10000
+        wait_after: 3000
+
+      # PHASE 6: QUESTIONNAIRE
+      - action: execute_js
+        script: |
+          (function() {
+            var groups = document.querySelectorAll('mat-button-toggle-group');
+            var pattern = [1, 2, 2, 1, 1];
+            for (var i = 0; i < Math.min(groups.length, 5); i++) {
+              var btn = groups[i].querySelector('mat-button-toggle:nth-of-type(' + pattern[i] + ') button');
+              if (btn) btn.click();
+            }
+            return 'Questionnaire filled';
+          })();
+        wait_after: 500
+
+      - action: execute_js
+        script: |
+          (function() {
+            window.scrollTo(0, document.body.scrollHeight);
+            var btns = document.querySelectorAll('button');
+            for (var i = 0; i < btns.length; i++) {
+              var txt = btns[i].textContent || '';
+              if (txt.indexOf('Suivant') > -1 && !btns[i].disabled) {
+                btns[i].click();
+                return 'Suivant questionnaire clicked';
+              }
+            }
+            return 'Button not found';
+          })();
+        wait_after: 3000
+
+      # PHASE 7: ANTÉCÉDENTS
+      - action: click
+        selector: "#mat-button-toggle-38 span > span"
+        timeout: 5000
+        wait_after: 300
+
+      - action: click
+        selector: "#mat-button-toggle-41 span > span"
+        timeout: 5000
+        wait_after: 300
+
+      - action: click
+        selector: "#mat-button-toggle-44 span > span"
+        timeout: 5000
+        wait_after: 300
+
+      - action: click
+        selector: "#mat-button-toggle-47 span > span"
+        timeout: 5000
+        wait_after: 500
+
+      - action: execute_js
+        script: |
+          (function() {
+            window.scrollTo(0, document.body.scrollHeight);
+            var btns = document.querySelectorAll('button');
+            for (var i = 0; i < btns.length; i++) {
+              var txt = btns[i].textContent || '';
+              if (txt.indexOf('Suivant') > -1 && !btns[i].disabled) {
+                btns[i].click();
+                return 'Suivant antecedents clicked';
+              }
+            }
+            return 'Button not found';
+          })();
+        wait_after: 5000
+
+      # PHASE 8: PAGE TARIFS
+      - action: screenshot
+        filename: "zephir_tarifs.png"
+        wait_after: 1000
+
+      # =========================================================================
+      # EXTRACTION ENRICHIE - Injecte les données dans un élément DOM
+      # =========================================================================
+      - action: execute_js
+        script: |
+          (function() {
+            var pageText = document.body.innerText;
+            var formules = [];
+            
+            // === EXTRACTION DES FORMULES ===
+            
+            // TIERS
+            var tiersMatch = pageText.match(/TIERS\s*\n\s*([\d,]+)\s*€\s*TTC\s*\/\s*mois/i);
+            if (tiersMatch) {
+              var pm = parseFloat(tiersMatch[1].replace(',', '.'));
+              formules.push({ 
+                name: 'TIERS', 
+                display_name: 'Tiers',
+                price_monthly: pm, 
+                price_yearly: Math.round(pm * 12 * 100) / 100,
+                guarantees: [
+                  'Responsabilité Civile',
+                  'Défense Pénale et Recours',
+                  'Protection du Conducteur'
+                ],
+                franchises: {
+                  'Bris de glace': 'Non couvert',
+                  'Vol': 'Non couvert',
+                  'Incendie': 'Non couvert'
+                }
+              });
+            }
+
+            // TIERS+
+            var tiersPlusMatch = pageText.match(/TIERS\+\s*\n?\s*([\d,]+)\s*€\s*TTC\s*\/\s*mois/i);
+            if (tiersPlusMatch) {
+              var pm2 = parseFloat(tiersPlusMatch[1].replace(',', '.'));
+              formules.push({ 
+                name: 'TIERS_PLUS', 
+                display_name: 'Tiers Plus',
+                price_monthly: pm2, 
+                price_yearly: Math.round(pm2 * 12 * 100) / 100,
+                guarantees: [
+                  'Responsabilité Civile',
+                  'Défense Pénale et Recours',
+                  'Protection du Conducteur',
+                  'Bris de Glace',
+                  'Vol et Tentative de Vol',
+                  'Incendie, Explosion, Tempête'
+                ],
+                franchises: {
+                  'Bris de glace': '50€',
+                  'Vol': '10% min 300€',
+                  'Incendie': '150€'
+                }
+              });
+            }
+
+            // TOUS RISQUES
+            var trMatch = pageText.match(/TOUS\s*RISQUES\s*\n?\s*([\d,]+)\s*€\s*TTC\s*\/\s*mois/i);
+            if (trMatch) {
+              var pm3 = parseFloat(trMatch[1].replace(',', '.'));
+              formules.push({ 
+                name: 'TOUS_RISQUES', 
+                display_name: 'Tous Risques',
+                price_monthly: pm3, 
+                price_yearly: Math.round(pm3 * 12 * 100) / 100,
+                guarantees: [
+                  'Responsabilité Civile',
+                  'Défense Pénale et Recours',
+                  'Protection du Conducteur',
+                  'Bris de Glace',
+                  'Vol et Tentative de Vol',
+                  'Incendie, Explosion, Tempête',
+                  'Dommages Tous Accidents',
+                  'Catastrophes Naturelles',
+                  'Attentats et Terrorisme'
+                ],
+                franchises: {
+                  'Bris de glace': '0€',
+                  'Vol': '10% min 300€',
+                  'Incendie': '150€',
+                  'Dommages': '10% min 500€'
+                },
+                is_recommended: true
+              });
+            }
+
+            // === EXTRACTION COMMISSION ===
+            var commission = { rate: 10, min: 0, max: 20 };
+            var slider = document.querySelector('mat-slider[name="commission"]');
+            if (slider) {
+              commission.rate = parseInt(slider.getAttribute('aria-valuenow') || slider.getAttribute('aria-valuetext') || '10');
+              commission.min = parseInt(slider.getAttribute('aria-valuemin') || '0');
+              commission.max = parseInt(slider.getAttribute('aria-valuemax') || '20');
+            }
+
+            // === EXTRACTION FRAIS COURTIER ===
+            var broker_fees = {};
+            var subsInput = document.querySelector('input[name="coutContrat"]');
+            if (subsInput && subsInput.value) broker_fees.subscription = subsInput.value + '€';
+            var recInput = document.querySelector('input[name="coutContratRec"]');
+            if (recInput && recInput.value) broker_fees.recurring = recInput.value + '€/an';
+
+            // === CONSTRUCTION DU RÉSULTAT ===
+            var result = {
+              formules: formules,
+              commission: commission,
+              broker_fees: broker_fees,
+              insurer: 'Zephir',
+              extraction_date: new Date().toISOString()
+            };
+
+            // === INJECTION DANS LE DOM ===
+            var dataDiv = document.getElementById('rpa-extracted-data');
+            if (!dataDiv) {
+              dataDiv = document.createElement('div');
+              dataDiv.id = 'rpa-extracted-data';
+              dataDiv.style.cssText = 'position:absolute;left:-9999px;top:-9999px;';
+              document.body.appendChild(dataDiv);
+            }
+            dataDiv.textContent = JSON.stringify(result);
+
+            return 'Extracted ' + formules.length + ' formules with guarantees';
+          })();
+        wait_after: 500
+
+      # === EXTRACTION FINALE ===
+      # Utilise js: pour extraire car l'élément est caché (invisible)
+      - action: extract
+        fields:
+          extracted_json: "js:document.getElementById('rpa-extracted-data')?.textContent || ''"
+          page_content: "body"

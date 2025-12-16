@@ -1,0 +1,286 @@
+# ========================================
+# Direct Assurance - Configuration RPA
+# ========================================
+# Assureur: Direct Assurance (France)
+# Leader de l'assurance en ligne française
+# Membre du groupe AXA
+# Version: 1.0.1 - FIXED selectors
+# Date: 2025-01-10
+# ========================================
+
+insurer_name: "Direct Assurance"
+base_url: "https://www.direct-assurance.fr"
+simulator_path: "/assurance-auto/devis-assurance-auto"
+country: "FR"
+complexity: 2
+rating: 4.2
+description: "Leader français de l'assurance en ligne, filiale AXA"
+
+# Configuration du navigateur
+browser_config:
+  headless: true
+  timeout: 30000
+  viewport:
+    width: 1920
+    height: 1080
+  locale: "fr-FR"
+  timezone: "Europe/Paris"
+
+# Configuration des retries
+retry_config:
+  max_retries: 3
+  retry_delay: 2000
+  backoff_multiplier: 2
+
+# Workflows par produit
+workflows:
+  # ===================================
+  # WORKFLOW: Assurance Auto
+  # ===================================
+  auto:
+    steps:
+      # Étape 1: Navigation vers le formulaire
+      - action: navigate
+        url: "{{base_url}}{{simulator_path}}"
+        wait_after: 3000
+        description: "Accès au simulateur de devis auto"
+
+      # Étape 2: Accepter les cookies (FIXED selector)
+      - action: click
+        selector: "#popin_tc_privacy_button, button:has-text('Tout accepter')"
+        wait_after: 2000
+        optional: true
+        description: "Accepter les cookies"
+
+      # Étape 3: Cliquer sur "DEVIS EN LIGNE" (FIXED selector)
+      - action: click
+        selector: "a:has-text('DEVIS EN LIGNE'), a.btn.btn--bg-electricRed_gradient:has-text('DEVIS')"
+        wait_after: 3000
+        optional: false
+        description: "Démarrer le processus de devis"
+
+      # Étape 4: Attendre le formulaire
+      - action: wait_for
+        selector: "input[name='immatriculation'], input[placeholder*='immatriculation'], form"
+        timeout: 10000
+        description: "Attendre l'affichage du formulaire"
+
+      # Étape 5: Remplir l'immatriculation du véhicule
+      - action: fill_form
+        selectors:
+          immatriculation: "input[name='immatriculation'], input[placeholder*='immatriculation'], #immatriculation, input[id*='plaque']"
+        mapping:
+          immatriculation: "{{vehicle_registration}}"
+        wait_after: 1500
+        description: "Saisir l'immatriculation"
+
+      # Étape 6: Valider l'immatriculation
+      - action: click
+        selector: "button[type='submit'], button:has-text('Continuer'), button:has-text('Suivant'), .btn-primary"
+        wait_after: 3000
+        description: "Valider l'immatriculation"
+
+      # Étape 7: Attendre le chargement des données du véhicule
+      - action: wait_for
+        selector: "input[name='dateCirculation'], select[name='carburant'], .vehicle-info"
+        timeout: 5000
+        optional: true
+        description: "Attendre les infos véhicule"
+
+      # Étape 8: Remplir les informations du conducteur
+      - action: fill_form
+        selectors:
+          date_permis: "input[name='datePermis'], input[placeholder*='permis'], #datePermis"
+          bonus_malus: "input[name='bonus'], select[name='coefficientBonus'], #bonus"
+          nb_sinistres: "select[name='sinistres'], input[name='nombreSinistres'], #sinistres"
+        mapping:
+          date_permis: "{{driver_license_date}}"
+          bonus_malus: "{{bonus_malus}}"
+          nb_sinistres: "{{nb_claims}}"
+        wait_after: 1000
+        optional: true
+        description: "Informations conducteur"
+
+      # Étape 9: Sélectionner l'usage du véhicule
+      - action: select
+        selector: "select[name='usage'], input[type='radio'][name='usage']"
+        value: "{{usage}}"
+        mapping:
+          private: "Privé, Trajets domicile-travail"
+          professional: "Professionnel, Tournées"
+          mixed: "Mixte, Déplacements professionnels"
+        wait_after: 800
+        optional: true
+        description: "Usage du véhicule"
+
+      # Étape 10: Sélectionner le type de stationnement
+      - action: select
+        selector: "select[name='stationnement'], input[type='radio'][name='parking']"
+        value: "{{parking_type}}"
+        mapping:
+          street: "Voie publique, Rue"
+          private_parking: "Parking privé, Box, Garage collectif"
+          garage: "Garage fermé, Box personnel"
+        wait_after: 800
+        optional: true
+        description: "Type de stationnement"
+
+      # Étape 11: Renseigner le kilométrage annuel
+      - action: select
+        selector: "select[name='kilometrage'], #km_annuel"
+        value: "{{annual_km}}"
+        mapping:
+          5000: "0 à 5000 km, Moins de 5000"
+          10000: "5000 à 10000 km, Entre 5000 et 10000"
+          15000: "10000 à 15000 km, Entre 10000 et 15000"
+          20000: "15000 à 20000 km, Entre 15000 et 20000"
+          more: "Plus de 20000 km, Plus de 20000"
+        wait_after: 800
+        optional: true
+        description: "Kilométrage annuel"
+
+      # Étape 12: Valider et passer à l'étape suivante
+      - action: click
+        selector: "button[type='submit'], button:has-text('Continuer'), button:has-text('Voir les tarifs'), .btn-next"
+        wait_after: 4000
+        optional: true
+        description: "Valider les informations"
+
+      # Étape 13: Attendre l'affichage des résultats
+      - action: wait_for
+        selector: ".tarif-mensuel, .price-block, .tarif, [class*='prix'], [class*='price']"
+        timeout: 10000
+        optional: true
+        description: "Attendre l'affichage des tarifs"
+
+      # Étape 14: Extraire les données du devis
+      - action: extract
+        fields:
+          # Prix
+          price_monthly: ".tarif-mensuel, .prix-mensuel, [data-test*='price-monthly'], .monthly-price"
+          price_yearly: ".tarif-annuel, .prix-annuel, [data-test*='price-yearly'], .annual-price"
+
+          # Formule
+          formula_name: ".formule-nom, .formula-name, h3.formule, [data-test='formula-name']"
+
+          # Référence (si disponible)
+          reference: ".reference-devis, .quote-ref, [data-test='quote-reference']"
+
+          # Détails des garanties
+          garanties: ".garanties-list li, .coverage-item, [class*='garantie']"
+
+        description: "Extraction des données du devis"
+
+      # Étape 15: Screenshot final pour vérification
+      - action: screenshot
+        force: true
+        description: "Capture d'écran du résultat"
+
+# Mapping des champs de formulaire vers les sélecteurs
+field_mappings:
+  # Véhicule
+  vehicle_registration:
+    field_name: "Immatriculation"
+    selector: "input[name='immatriculation']"
+    type: "text"
+    required: true
+
+  vehicle_brand:
+    field_name: "Marque"
+    selector: "select[name='marque'], input[name='marque']"
+    type: "select"
+    required: false
+
+  vehicle_model:
+    field_name: "Modèle"
+    selector: "select[name='modele'], input[name='modele']"
+    type: "select"
+    required: false
+
+  # Conducteur
+  driver_age:
+    field_name: "Âge du conducteur"
+    selector: "input[name='age'], select[name='ageConduit']"
+    type: "number"
+    required: true
+
+  driver_license_date:
+    field_name: "Date d'obtention du permis"
+    selector: "input[name='datePermis']"
+    type: "date"
+    required: true
+
+  bonus_malus:
+    field_name: "Coefficient bonus-malus"
+    selector: "input[name='bonus'], select[name='coefficientBonus']"
+    type: "number"
+    required: true
+
+  # Usage
+  usage:
+    field_name: "Usage du véhicule"
+    selector: "select[name='usage']"
+    type: "select"
+    required: true
+    options:
+      - "private"
+      - "professional"
+      - "mixed"
+
+  parking_type:
+    field_name: "Type de stationnement"
+    selector: "select[name='stationnement']"
+    type: "select"
+    required: true
+    options:
+      - "street"
+      - "private_parking"
+      - "garage"
+
+  annual_km:
+    field_name: "Kilométrage annuel"
+    selector: "select[name='kilometrage']"
+    type: "select"
+    required: true
+
+# Configuration des garanties attendues
+expected_coverages:
+  - "Responsabilité Civile"
+  - "Défense Pénale et Recours"
+  - "Protection Juridique"
+  - "Dommages tous accidents"
+  - "Vol"
+  - "Incendie"
+  - "Bris de glace"
+  - "Assistance"
+  - "Garantie conducteur"
+
+# Configuration du scraping
+scraping_config:
+  screenshot_on_error: true
+  save_html: false
+  max_execution_time: 60
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+# Notes et limitations
+notes:
+  - "Direct Assurance utilise un formulaire multi-étapes"
+  - "L'immatriculation permet de récupérer automatiquement les données du véhicule"
+  - "Le devis s'affiche en temps réel sans inscription préalable"
+  - "Pas de CAPTCHA détecté sur le parcours standard"
+  - "La formule recommandée est mise en avant par défaut"
+  - "Il existe 4 formules: Tiers, Tiers+, Tous Risques, Tous Risques Maxi"
+  - "FIXED: Cookies button selector = #popin_tc_privacy_button"
+  - "FIXED: Start button selector = a:has-text('DEVIS EN LIGNE')"
+
+# Exemples de valeurs de test
+test_data:
+  auto:
+    vehicle_registration: "AA-123-BB"
+    driver_age: 35
+    driver_license_date: "2005-06-15"
+    bonus_malus: "0.50"
+    nb_claims: "0"
+    usage: "private"
+    parking_type: "garage"
+    annual_km: "12000"

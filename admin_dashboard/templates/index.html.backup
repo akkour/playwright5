@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EvaRAG Admin Dashboard</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; background: #1a1a2e; color: #fff; padding: 20px; }
+        .header { background: #16213e; padding: 20px; border-radius: 10px; margin-bottom: 20px; }
+        .header h1 { font-size: 24px; }
+        .status { display: inline-block; padding: 5px 15px; border-radius: 20px; margin-left: 20px; }
+        .status.connected { background: rgba(76, 175, 80, 0.3); color: #4CAF50; }
+        .status.disconnected { background: rgba(244, 67, 54, 0.3); color: #F44336; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+        .card { background: #16213e; padding: 20px; border-radius: 10px; }
+        .card h2 { margin-bottom: 15px; border-bottom: 2px solid #2196F3; padding-bottom: 10px; }
+        .service-item { background: rgba(255,255,255,0.05); padding: 15px; margin: 10px 0; border-radius: 8px; border-left: 4px solid #4CAF50; }
+        .service-item.stopped { border-left-color: #F44336; opacity: 0.6; }
+        .stat-item { padding: 10px; margin: 5px 0; background: rgba(255,255,255,0.05); border-radius: 5px; }
+        button { padding: 10px 20px; background: #2196F3; color: white; border: none; border-radius: 5px; cursor: pointer; margin: 5px; }
+        button:hover { background: #1976D2; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🐳 EvaRAG Admin Dashboard</h1>
+        <span class="status disconnected" id="status">● Connecting...</span>
+        <span id="time" style="float: right;"></span>
+    </div>
+    
+    <div class="grid">
+        <div class="card">
+            <h2>📦 Services</h2>
+            <div id="services">Loading...</div>
+        </div>
+        
+        <div class="card">
+            <h2>💻 Resources</h2>
+            <div id="stats">Loading...</div>
+        </div>
+        
+        <div class="card">
+            <h2>⚡ Actions</h2>
+            <button onclick="refreshAll()">🔄 Refresh</button>
+            <button onclick="alert('Feature coming soon!')">🚀 Deploy</button>
+        </div>
+    </div>
+
+    <script>
+        let ws;
+        const statusEl = document.getElementById('status');
+        
+        function connectWS() {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${location.host}/ws`);
+            
+            ws.onopen = () => {
+                statusEl.textContent = '● Connected';
+                statusEl.className = 'status connected';
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === 'update') {
+                    updateServices(data.data.services);
+                    updateStats(data.data.stats);
+                }
+            };
+            
+            ws.onerror = ws.onclose = () => {
+                statusEl.textContent = '● Disconnected';
+                statusEl.className = 'status disconnected';
+                setTimeout(connectWS, 5000);
+            };
+        }
+        
+        function updateServices(services) {
+            const html = services.map(s => `
+                <div class="service-item ${s.state !== 'running' ? 'stopped' : ''}">
+                    <strong>${s.display_name}</strong><br>
+                    Status: ${s.state}
+                </div>
+            `).join('');
+            document.getElementById('services').innerHTML = html || 'No services';
+        }
+        
+        function updateStats(stats) {
+            const html = stats.map(s => `
+                <div class="stat-item">
+                    <strong>${s.name}</strong><br>
+                    CPU: ${s.cpu} | Memory: ${s.memory}
+                </div>
+            `).join('');
+            document.getElementById('stats').innerHTML = html || 'No stats';
+        }
+        
+        function refreshAll() {
+            location.reload();
+        }
+        
+        setInterval(() => {
+            document.getElementById('time').textContent = new Date().toLocaleTimeString();
+        }, 1000);
+        
+        connectWS();
+    </script>
+</body>
+</html>

@@ -1,0 +1,227 @@
+"""
+RPA QuoteScraper - Moteur principal de scraping de devis
+Version: 1.0.0
+
+Orchestre le processus complet de scraping:
+1. Chargement de la configuration
+2. Création du scraper approprié
+3. Exécution du scraping
+4. Gestion des erreurs et retry
+"""
+
+import asyncio
+import logging
+import time
+from typing import Optional
+from datetime import datetime
+
+from playwright.async_api import async_playwright, Page, Browser, BrowserContext
+
+from .models import RPAQuoteRequest, RPAQuoteResponse, QuoteResult
+from .config_manager import config_manager
+from .insurers import create_scraper
+from .exceptions import (
+    RPAException,
+    TimeoutError as RPATimeoutError,
+    ConfigurationError
+)
+
+logger = logging.getLogger(__name__)
+
+
+class QuoteScraper:
+    """Moteur principal de scraping de devis"""
+    
+    def __init__(self):
+        self.browser: Optional[Browser] = None
+        self.playwright_instance = None
+        logger.info("QuoteScraper initialized")
+    
+    async def scrape_quote(self, request: RPAQuoteRequest) -> RPAQuoteResponse:
+        """
+        Scrape un devis d'assurance
+        
+        Args:
+            request: Requête de scraping
+            
+        Returns:
+            Résultat du scraping
+        """
+        start_time = time.time()
+        job_id = request.job_id
+        
+        logger.info(
+            f"[Job {job_id}] Starting quote scraping: "
+            f"{request.insurer_name} / {request.product_code}"
+        )
+        
+        try:
+            # 1. Charger la configuration
+            config = await self._load_config(request)
+            
+            # 2. Créer le scraper
+            scraper = create_scraper(config)
+            
+            # 3. Initialiser Playwright
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=['--no-sandbox', '--disable-setuid-sandbox']
+                )
+                
+                context = await browser.new_context(
+                    user_agent=(
+                        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                        'AppleWebKit/537.36 (KHTML, like Gecko) '
+                        'Chrome/120.0.0.0 Safari/537.36'
+                    ),
+                    locale='fr-FR',
+                    timezone_id='Africa/Casablanca'
+                )
+                
+                page = await context.new_page()
+                
+                try:
+                    # 4. Exécuter le scraping avec retry
+                    result = await self._scrape_with_retry(
+                        scraper=scraper,
+                        page=page,
+                        request=request,
+                        max_retries=config.max_retries
+                    )
+                    
+                    duration_ms = int((time.time() - start_time) * 1000)
+                    
+                    logger.info(
+                        f"[Job {job_id}] ✅ Success in {duration_ms}ms: "
+                        f"{result.price_monthly or result.price_yearly} MAD"
+                    )
+                    
+                    return RPAQuoteResponse(
+                        status="success",
+                        job_id=job_id,
+                        result=result,
+                        duration_ms=duration_ms,
+                        screenshots=scraper.screenshots
+                    )
+                
+                finally:
+                    await page.close()
+                    await context.close()
+                    await browser.close()
+        
+        except RPATimeoutError as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            logger.error(f"[Job {job_id}] ⏰ Timeout: {e}")
+            
+            return RPAQuoteResponse(
+                status="timeout",
+                job_id=job_id,
+                error_message=str(e),
+                duration_ms=duration_ms
+            )
+        
+        except RPAException as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            logger.error(f"[Job {job_id}] ❌ RPA Error: {e}")
+            
+            return RPAQuoteResponse(
+                status="failed",
+                job_id=job_id,
+                error_message=str(e),
+                duration_ms=duration_ms
+            )
+        
+        except Exception as e:
+            duration_ms = int((time.time() - start_time) * 1000)
+            logger.error(f"[Job {job_id}] 💥 Unexpected error: {e}", exc_info=True)
+            
+            return RPAQuoteResponse(
+                status="failed",
+                job_id=job_id,
+                error_message=f"Unexpected error: {str(e)}",
+                duration_ms=duration_ms
+            )
+    
+    async def _load_config(self, request: RPAQuoteRequest):
+        """Charge la configuration de l'assureur"""
+        try:
+            # Option 1: Utiliser la config_yaml fournie dans la requête
+            if request.config_yaml:
+                logger.info(f"Loading config from request for {request.insurer_name}")
+                return config_manager.load_config_from_string(
+                    request.config_yaml,
+                    request.insurer_name
+                )
+            
+            # Option 2: Charger depuis le fichier local
+            logger.info(f"Loading config from file for {request.insurer_name}")
+            return config_manager.get_config(request.insurer_name)
+            
+        except Exception as e:
+            raise ConfigurationError(
+                f"Failed to load config for {request.insurer_name}: {e}",
+                insurer=request.insurer_name,
+                job_id=request.job_id
+            )
+    
+    async def _scrape_with_retry(
+        self,
+        scraper,
+        page: Page,
+        request: RPAQuoteRequest,
+        max_retries: int
+    ) -> QuoteResult:
+        """
+        Exécute le scraping avec mécanisme de retry
+        
+        Args:
+            scraper: Instance du scraper
+            page: Page Playwright
+            request: Requête de scraping
+            max_retries: Nombre max de tentatives
+            
+        Returns:
+            Résultat du scraping
+        """
+        last_error = None
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(
+                    f"[Job {request.job_id}] Attempt {attempt}/{max_retries}"
+                )
+                
+                # Définir le timeout
+                page.set_default_timeout(request.timeout * 1000)
+                
+                # Exécuter le scraping
+                result = await scraper.scrape_quote(
+                    page=page,
+                    product_code=request.product_code,
+                    form_data=request.form_data
+                )
+                
+                return result
+                
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    f"[Job {request.job_id}] Attempt {attempt} failed: {e}"
+                )
+                
+                # Si c'est la dernière tentative, lever l'erreur
+                if attempt == max_retries:
+                    raise
+                
+                # Attendre avant retry (backoff exponentiel)
+                wait_time = min(2 ** attempt, 10)  # Max 10 secondes
+                logger.info(f"Waiting {wait_time}s before retry...")
+                await asyncio.sleep(wait_time)
+        
+        # Ne devrait jamais arriver ici
+        raise last_error if last_error else Exception("Unknown error")
+
+
+# Instance globale
+quote_scraper = QuoteScraper()

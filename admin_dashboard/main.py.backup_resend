@@ -1,0 +1,264 @@
+import os
+import json
+import asyncio
+from pathlib import Path
+from typing import List, Dict, Any
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status
+from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+import secrets
+
+# Configuration
+ADMIN_USER = os.getenv("ADMIN_USER", "admin")
+ADMIN_PASS = os.getenv("ADMIN_PASS", "admin")
+PROJECT_DIR = os.getenv("PROJECT_DIR", "/workspace")
+
+# Services configuration
+SERVICES = {
+    "admin-dashboard": {"name": "Admin Dashboard", "color": "#2196F3"},
+    "playwright-crawler": {"name": "Playwright Crawler", "color": "#4CAF50"},
+    "document-processor-web": {"name": "Document Processor", "color": "#FF9800"},
+    "document-processor-worker": {"name": "Celery Worker", "color": "#9C27B0"},
+    "redis": {"name": "Redis", "color": "#f44336"},
+    "ocr-service": {"name": "OCR Service", "color": "#3F51B5"},
+    "easyocr-service": {"name": "EasyOCR Service", "color": "#009688"},
+    "browserless-browserless-1": {"name": "browserless-browserless", "color": "#607D8B"},
+}
+
+app = FastAPI(title="EvaRAG Admin Dashboard")
+security = HTTPBasic()
+
+# Authentication
+def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
+    correct_username = secrets.compare_digest(credentials.username, ADMIN_USER)
+    correct_password = secrets.compare_digest(credentials.password, ADMIN_PASS)
+    
+    if not (correct_username and correct_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
+
+# Docker command execution
+async def run_docker_command(cmd: List[str]) -> Dict[str, Any]:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await process.communicate()
+        return {
+            "success": process.returncode == 0,
+            "stdout": stdout.decode(),
+            "stderr": stderr.decode(),
+            "returncode": process.returncode
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "stdout": "",
+            "stderr": str(e),
+            "returncode": -1
+        }
+
+# Get service status
+async def get_service_status() -> List[Dict[str, Any]]:
+    # Utiliser docker ps directement
+    result = await run_docker_command(["docker", "ps", "-a", "--format", "{{json .}}"])
+    if not result["success"]:
+        return []
+    
+    services = []
+    for line in result["stdout"].strip().split('\n'):
+        if line:
+            try:
+                data = json.loads(line)
+                name = data.get("Names", "")
+                
+                # Mapper le status Docker
+                status = data.get("Status", "")
+                state = data.get("State", "")
+                
+                if state == "running":
+                    state_clean = "running"
+                elif state == "restarting":
+                    state_clean = "restarting"
+                elif state == "exited":
+                    state_clean = "stopped"
+                else:
+                    state_clean = state
+                
+                # Extraire le nom du service depuis le nom du container
+                service_name = name.replace("playwright-crawler-", "").replace("-1", "")
+                display_name = SERVICES.get(service_name, {}).get("name", name)
+                
+                services.append({
+                    "name": service_name,
+                    "display_name": display_name,
+                    "state": state_clean,
+                    "status": status,
+                    "color": SERVICES.get(service_name, {}).get("color", "#607D8B")
+                })
+            except:
+                pass
+    
+    return services
+
+# Get resource usage
+async def get_resource_usage() -> List[Dict[str, Any]]:
+    result = await run_docker_command(["docker", "stats", "--no-stream", "--format", "{{json .}}"])
+    if not result["success"]:
+        return []
+    
+    resources = []
+    for line in result["stdout"].strip().split('\n'):
+        if line:
+            try:
+                data = json.loads(line)
+                resources.append({
+                    "name": data.get("Name", ""),
+                    "cpu": data.get("CPUPerc", "0%"),
+                    "memory": data.get("MemUsage", "0B / 0B")
+                })
+            except:
+                pass
+    
+    return resources
+
+# WebSocket endpoint
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            services = await get_service_status()
+            resources = await get_resource_usage()
+            
+            await websocket.send_json({
+                "services": services,
+                "resources": resources
+            })
+            
+            await asyncio.sleep(5)
+    except WebSocketDisconnect:
+        pass
+
+# Main page
+@app.get("/")
+async def index(username: str = Depends(verify_credentials)):
+    html = Path(__file__).parent / "templates" / "index.html"
+    if html.exists():
+        return HTMLResponse(content=html.read_text())
+    return HTMLResponse("<h1>Dashboard</h1><p>Template not found</p>")
+
+# Health check
+@app.get("/api/health")
+async def health():
+    return {"status": "healthy"}
+
+# ==========================================
+# ACTIONS SUR LES SERVICES
+# ==========================================
+
+@app.post("/api/service/{service_name}/start")
+async def start_service(service_name: str, username: str = Depends(verify_credentials)):
+    """Démarrer un service"""
+    try:
+        result = await run_docker_command([
+            "docker", "compose", "-f", f"{PROJECT_DIR}/docker-compose.yml",
+            "start", service_name
+        ])
+        if result["success"]:
+            return {
+                "success": True,
+                "message": f"Service '{service_name}' démarré avec succès",
+                "service": service_name,
+                "action": "start"
+            }
+        else:
+            raise HTTPException(status_code=500, detail=result["stderr"])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/service/{service_name}/stop")
+async def stop_service(service_name: str, username: str = Depends(verify_credentials)):
+    """Arrêter un service"""
+    try:
+        result = await run_docker_command([
+            "docker", "compose", "-f", f"{PROJECT_DIR}/docker-compose.yml",
+            "stop", service_name
+        ])
+        if result["success"]:
+            return {
+                "success": True,
+                "message": f"Service '{service_name}' arrêté avec succès",
+                "service": service_name,
+                "action": "stop"
+            }
+        else:
+            raise HTTPException(status_code=500, detail=result["stderr"])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/service/{service_name}/restart")
+async def restart_service(service_name: str, username: str = Depends(verify_credentials)):
+    """Redémarrer un service"""
+    try:
+        result = await run_docker_command([
+            "docker", "compose", "-f", f"{PROJECT_DIR}/docker-compose.yml",
+            "restart", service_name
+        ])
+        if result["success"]:
+            return {
+                "success": True,
+                "message": f"Service '{service_name}' redémarré avec succès",
+                "service": service_name,
+                "action": "restart"
+            }
+        else:
+            raise HTTPException(status_code=500, detail=result["stderr"])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ==========================================
+# LOGS DES SERVICES
+# ==========================================
+@app.get("/api/service/{service_name}/logs")
+async def get_service_logs(
+    service_name: str, 
+    lines: int = 50,
+    username: str = Depends(verify_credentials)
+):
+    """Récupérer les logs d'un service"""
+    try:
+        # Limiter le nombre de lignes entre 10 et 1000
+        lines = max(10, min(lines, 1000))
+        
+        # Les containers n'ont PAS de préfixe, utiliser le nom direct
+        result = await run_docker_command([
+            "docker", "logs", "--tail", str(lines), service_name
+        ])
+        
+        if result["success"]:
+            # Combiner stdout et stderr
+            logs = result["stdout"]
+            if result["stderr"]:
+                logs = logs + "\n" + result["stderr"]
+            
+            return {
+                "success": True,
+                "service": service_name,
+                "lines": lines,
+                "logs": logs if logs else "Aucun log disponible"
+            }
+        else:
+            raise HTTPException(status_code=500, detail=result["stderr"])
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+

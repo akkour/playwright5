@@ -1,0 +1,267 @@
+# /home/ubuntu/playwright-crawler/document_processor/tasks.py
+import io
+import os
+import httpx
+from celery import Celery, group
+from pdf2image import convert_from_bytes, pdfinfo_from_bytes
+import docx
+import openpyxl
+import pptx
+from google.cloud import vision
+
+# --- Configuration de Celery ---
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
+celery_app = Celery("tasks", broker=CELERY_BROKER_URL, result_backend=CELERY_BROKER_URL)
+
+# --- Configuration des services externes ---
+OCR_SERVICE_URL = os.environ.get("OCR_SERVICE_URL", "http://ocr-service:8000/ocr")
+EASYOCR_SERVICE_URL = os.environ.get("EASYOCR_SERVICE_URL", "http://easyocr-service:8001/ocr")
+CALLBACK_SECRET = os.environ.get("CALLBACK_SECRET")
+N8N_TRIAGE_URL = os.environ.get("N8N_TRIAGE_URL")
+N8N_LLM_OCR_URL = os.environ.get("N8N_LLM_OCR_URL")
+COMPLEX_OCR_ENGINE = os.environ.get("COMPLEX_OCR_ENGINE", "llm") # 'google' or 'llm'
+
+# --- SOUS-TÂCHE : OCR D'UNE SEULE PAGE ---
+@celery_app.task(name="ocr_page_task")
+def ocr_page_task(image_bytes: bytes, filename: str) -> str:
+    """Effectue l'OCR d'une seule image avec la logique de fallback Tesseract -> EasyOCR."""
+    content_type = "image/png"
+    text_result = ""
+    print(f"OCR Page Task: Tentative sur '{filename}' avec Tesseract...")
+    with httpx.Client() as client:
+        files = {'file': (filename, image_bytes, content_type)}
+        try:
+            response = client.post(OCR_SERVICE_URL, files=files, timeout=120.0)
+            response.raise_for_status()
+            text_result = response.json().get("text", "").strip()
+        except httpx.HTTPError as e:
+            print(f"Tesseract a échoué pour {filename}: {e}")
+
+    if not text_result or len(text_result.split()) < 5:
+        print(f"Résultat Tesseract médiocre pour {filename}. Tentative avec EasyOCR...")
+        with httpx.Client() as client:
+            files = {'file': (filename, image_bytes, content_type)}
+            try:
+                response = client.post(EASYOCR_SERVICE_URL, files=files, timeout=300.0)
+                response.raise_for_status()
+                text_result = response.json().get("text", "").strip()
+                print(f"OCR EasyOCR terminé pour {filename}.")
+            except httpx.HTTPError as e:
+                print(f"EasyOCR a également échoué pour {filename}: {e}")
+    
+    return text_result
+
+# --- Fonctions de traitement (Helpers) ---
+
+def handle_image(file_bytes: bytes, filename: str, content_type: str) -> dict:
+    """Lance la sous-tâche d'OCR pour une seule image et attend le résultat."""
+    result_text = ocr_page_task.delay(file_bytes, filename).get()
+    return {"filename": filename, "text": result_text}
+
+def handle_pdf(file_bytes: bytes, filename: str) -> dict:
+    """Orchestre le traitement parallèle de chaque page d'un PDF."""
+    print(f"Début du traitement parallèle pour {filename}")
+    pages_as_images = convert_from_bytes(file_bytes, dpi=300)
+    print(f"{len(pages_as_images)} pages à traiter en parallèle...")
+
+    task_signatures = []
+    for i, page_image in enumerate(pages_as_images):
+        with io.BytesIO() as image_buffer:
+            page_image.save(image_buffer, format="PNG")
+            image_bytes = image_buffer.getvalue()
+        task_signatures.append(ocr_page_task.s(image_bytes, f"page_{i+1}.png"))
+
+    job_group = group(task_signatures)
+    print("Lancement du groupe de tâches OCR...")
+    result_group = job_group.apply_async()
+    print(f"Groupe de tâches {result_group.id} lancé. En attente des résultats...")
+    
+    ordered_results = result_group.get(disable_sync_subtasks=False)
+    print("Toutes les tâches OCR parallèles sont terminées.")
+
+    return {"filename": filename, "text": "\n\n--- Page Suivante ---\n\n".join(ordered_results)}
+
+def handle_word(file_bytes: bytes, filename: str) -> dict:
+    """Extrait le texte d'un .docx en format Markdown."""
+    document = docx.Document(io.BytesIO(file_bytes))
+    md_lines = []
+    for para in document.paragraphs:
+        if para.style.name.startswith('Heading 1'): md_lines.append(f"# {para.text}")
+        elif para.style.name.startswith('Heading 2'): md_lines.append(f"## {para.text}")
+        elif para.style.name.startswith('Heading 3'): md_lines.append(f"### {para.text}")
+        elif para.style.name == 'List Paragraph': md_lines.append(f"* {para.text}")
+        else:
+            line = ""
+            for run in para.runs:
+                text = run.text
+                if run.bold: text = f"**{text}**"
+                if run.italic: text = f"*{text}*"
+                line += text
+            md_lines.append(line)
+    return {"filename": filename, "text": "\n\n".join(md_lines)}
+
+def handle_excel(file_bytes: bytes, filename: str) -> dict:
+    """Convertit les feuilles d'un .xlsx en tables Markdown."""
+    workbook = openpyxl.load_workbook(io.BytesIO(file_bytes))
+    md_parts = []
+    for sheet in workbook.worksheets:
+        md_parts.append(f"## {sheet.title}\n")
+        rows_data = list(sheet.iter_rows())
+        if not rows_data: continue
+        header = [str(cell.value or "") for cell in rows_data[0]]
+        md_parts.append(f"| {' | '.join(header)} |")
+        md_parts.append(f"| {' | '.join(['---'] * len(header))} |")
+        for row in rows_data[1:]:
+            row_data = [str(cell.value or "") for cell in row]
+            md_parts.append(f"| {' | '.join(row_data)} |")
+        md_parts.append("\n")
+    return {"filename": filename, "text": "\n".join(md_parts)}
+
+def handle_powerpoint(file_bytes: bytes, filename: str) -> dict:
+    """Convertit un .pptx en Markdown."""
+    presentation = pptx.Presentation(io.BytesIO(file_bytes))
+    md_parts = []
+    for i, slide in enumerate(presentation.slides):
+        md_parts.append(f"\n## Diapositive {i + 1}\n")
+        try:
+            if slide.shapes.title and slide.shapes.title.text:
+                md_parts.append(f"### {slide.shapes.title.text}\n")
+        except AttributeError: pass
+        for shape in slide.shapes:
+            if not shape.has_text_frame: continue
+            if hasattr(shape.text_frame, 'text') and shape.text_frame.text:
+                is_title = False
+                if shape.is_placeholder and hasattr(shape.placeholder_format, 'type'):
+                     if 'TITLE' in str(shape.placeholder_format.type): is_title = True
+                if not is_title:
+                    for paragraph in shape.text_frame.paragraphs:
+                        line = paragraph.text
+                        if paragraph.level > 0: line = "  " * paragraph.level + f"* {line}"
+                        md_parts.append(line)
+    return {"filename": filename, "text": "\n".join(md_parts)}
+
+def handle_complex_document_with_google(file_bytes: bytes, filename: str, content_type: str) -> dict:
+    """Gère un document complexe (image ou PDF) en utilisant Google Cloud Vision AI."""
+    print(f"Traitement de {filename} avec Google Cloud Vision AI...")
+    client = vision.ImageAnnotatorClient()
+    if content_type == "application/pdf":
+        all_pages_text = []
+        pdf_images = convert_from_bytes(file_bytes, dpi=300)
+        print(f"Le PDF contient {len(pdf_images)} pages. Envoi de chaque page à Google Vision...")
+        for i, page_image in enumerate(pdf_images):
+            print(f"Traitement de la page {i+1} avec Google Vision...")
+            with io.BytesIO() as image_buffer:
+                page_image.save(image_buffer, format="PNG")
+                img_bytes = image_buffer.getvalue()
+            image = vision.Image(content=img_bytes)
+            response = client.document_text_detection(image=image)
+            if response.error.message:
+                raise Exception(f"Erreur de l'API Google Vision sur la page {i+1}: {response.error.message}")
+            all_pages_text.append(response.full_text_annotation.text)
+        return {"filename": filename, "text": "\n\n--- Page Suivante ---\n\n".join(all_pages_text)}
+    else: # C'est déjà une image
+        image = vision.Image(content=file_bytes)
+        response = client.document_text_detection(image=image)
+        if response.error.message:
+            raise Exception(f"Erreur de l'API Google Vision: {response.error.message}")
+        return {"filename": filename, "text": response.full_text_annotation.text}
+
+def handle_document_with_n8n_llm(file_bytes: bytes, filename: str, content_type: str) -> dict:
+    """Appelle le workflow n8n pour un OCR basé sur un LLM pour le document entier."""
+    print(f"Traitement de {filename} avec le moteur n8n LLM-OCR...")
+    if content_type == "application/pdf":
+        all_pages_text = []
+        pdf_images = convert_from_bytes(file_bytes, dpi=300)
+        print(f"Le PDF contient {len(pdf_images)} pages. Envoi de chaque page au LLM-OCR n8n...")
+        for i, page_image in enumerate(pdf_images):
+            print(f"Traitement de la page {i+1} avec le LLM-OCR...")
+            with io.BytesIO() as image_buffer:
+                page_image.save(image_buffer, format="PNG")
+                img_bytes = image_buffer.getvalue()
+            with httpx.Client() as client:
+                files = {'data': (f"page_{i+1}.png", img_bytes, 'image/png')}
+                response = client.post(N8N_LLM_OCR_URL, files=files, timeout=300.0)
+                response.raise_for_status()
+                all_pages_text.append(response.text)
+        return {"filename": filename, "text": "\n\n--- Page Suivante ---\n\n".join(all_pages_text)}
+    else: # C'est déjà une image
+        with httpx.Client() as client:
+            files = {'data': (filename, file_bytes, content_type)}
+            response = client.post(N8N_LLM_OCR_URL, files=files, timeout=300.0)
+            response.raise_for_status()
+            return {"filename": filename, "text": response.text}
+
+# --- Tâche Celery Principale ---
+@celery_app.task(name="process_document_task")
+def process_document_task(file_bytes: bytes, filename: str, content_type: str, job_id: str, callback_url: str):
+    print(f"[Job {job_id}] Tâche Celery démarrée pour {filename}")
+    result_payload = {"job_id": job_id}
+    try:
+        triage_result = "simple"
+        if content_type in ["application/pdf", "image/jpeg", "image/png"]:
+            print(f"[Job {job_id}] Évaluation de la complexité via n8n...")
+            if content_type == "application/pdf":
+                info = pdfinfo_from_bytes(file_bytes)
+                page_count = info["Pages"]
+                pages_to_sample = sorted(list(set([1, (page_count // 2) + 1, page_count])))
+                print(f"[Job {job_id}] Échantillonnage des pages: {pages_to_sample}")
+                for page_num in pages_to_sample:
+                    print(f"[Job {job_id}] Analyse de la page {page_num}...")
+                    page_image_obj = convert_from_bytes(file_bytes, dpi=300, first_page=page_num, last_page=page_num)[0]
+                    with io.BytesIO() as image_buffer:
+                        page_image_obj.save(image_buffer, format="PNG")
+                        image_bytes = image_buffer.getvalue()
+                    with httpx.Client() as client:
+                        files = {'data': (f"page_{page_num}.png", image_bytes, 'image/png')}
+                        response = client.post(N8N_TRIAGE_URL, files=files, timeout=60.0)
+                        response.raise_for_status()
+                        current_page_result = response.text.strip().lower()
+                        print(f"[Job {job_id}] Résultat pour la page {page_num}: '{current_page_result}'")
+                    if "complexe" in current_page_result:
+                        triage_result = "complexe"
+                        break
+            else:
+                with httpx.Client() as client:
+                    files = {'data': (filename, file_bytes, 'image/png')}
+                    response = client.post(N8N_TRIAGE_URL, files=files, timeout=60.0)
+                    response.raise_for_status()
+                    triage_result = response.text.strip().lower()
+            print(f"[Job {job_id}] Résultat final du triage: '{triage_result}'")
+
+        if "complexe" in triage_result:
+            print(f"[Job {job_id}] Document complexe détecté. Moteur sélectionné: {COMPLEX_OCR_ENGINE}")
+            if COMPLEX_OCR_ENGINE == "llm":
+                result = handle_document_with_n8n_llm(file_bytes, filename, content_type)
+            else:
+                result = handle_complex_document_with_google(file_bytes, filename, content_type)
+        else:
+            print(f"[Job {job_id}] Document simple. Traitement standard en cours...")
+            if content_type in ["image/jpeg", "image/png"]:
+                result = handle_image(file_bytes, filename, content_type)
+            elif content_type == "application/pdf":
+                result = handle_pdf(file_bytes, filename)
+            elif content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                result = handle_word(file_bytes, filename)
+            elif content_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+                result = handle_excel(file_bytes, filename)
+            elif content_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+                result = handle_powerpoint(file_bytes, filename)
+            else:
+                raise ValueError(f"Type de fichier non supporté: {content_type}")
+
+        result_payload["status"] = "completed"
+        result_payload["extracted_text"] = result.get("text")
+        print(f"[Job {job_id}] Traitement terminé avec succès.")
+    except Exception as e:
+        print(f"[Job {job_id}] ERREUR FATALE DANS LA TÂCHE CELERY: {str(e)}")
+        result_payload["status"] = "failed"
+        result_payload["error"] = f"Erreur fatale du worker: {str(e)}"
+    
+    with httpx.Client() as client:
+        print(f"[Job {job_id}] Envoi du résultat vers l'URL de callback: {callback_url}")
+        headers = {"Content-Type": "application/json", "x-processor-secret": CALLBACK_SECRET}
+        try:
+            client.post(callback_url, json=result_payload, headers=headers, timeout=30.0)
+            print(f"[Job {job_id}] Callback envoyé avec succès.")
+        except Exception as e:
+            print(f"[Job {job_id}] ERREUR: L'envoi du callback a échoué: {str(e)}")

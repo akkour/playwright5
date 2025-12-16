@@ -1,0 +1,35 @@
+import io
+from fastapi import FastAPI, UploadFile, File, HTTPException
+import easyocr
+from PIL import Image
+
+# --- Initialisation ---
+# Les modèles sont chargés une seule fois au démarrage pour plus de rapidité.
+# Ajoutez d'autres langues si nécessaire, ex: ['fr', 'ar', 'en']
+print("Chargement des modèles EasyOCR (français, arabe)...")
+reader = easyocr.Reader(['fr', 'ar'], gpu=False) # Mettre gpu=True si vous avez un GPU
+print("Modèles EasyOCR chargés.")
+
+app = FastAPI(title="EasyOCR Service")
+
+@app.post("/ocr", summary="Extraire le texte d'une image avec EasyOCR")
+async def perform_easyocr(file: UploadFile = File(...)):
+    print(f"EasyOCR: Reçu une requête pour le fichier {file.filename}")
+    try:
+        # Lire les données de l'image
+        image_bytes = await file.read()
+        
+        # Utiliser EasyOCR pour lire le texte
+        # detail=0: renvoie uniquement le texte
+        # paragraph=True: regroupe le texte en paragraphes cohérents
+        result = reader.readtext(image_bytes, detail=0, paragraph=True)
+        
+        # Joindre les paragraphes en un seul bloc de texte
+        full_text = "\n".join(result)
+        
+        print(f"EasyOCR: Extraction terminée.")
+        return {"filename": file.filename, "text": full_text}
+
+    except Exception as e:
+        print(f"EasyOCR: ERREUR: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

@@ -1,0 +1,105 @@
+version: '3.8'
+
+services:
+  playwright-crawler:
+    build: .
+    container_name: playwright-crawler
+    ports:
+      - "30001:11235"
+    restart: always
+    shm_size: '2gb'
+    environment:
+      - WORKER_PORT=11235
+      - WORKER_BASE_PATH=/crawl4ai
+      - CRAWLER_WORKER_SECRET=${CRAWLER_WORKER_SECRET}
+      - CORS_ALLOW_ORIGINS=*
+      - LOG_LEVEL=info
+      - PYTHONUNBUFFERED=1
+      - UVICORN_WORKERS=2
+      - UVICORN_TIMEOUT_KEEP_ALIVE=75
+      - UVICORN_LIMIT_MAX_REQUESTS=1000
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:11235/crawl4ai/health"]
+      interval: 30s
+      timeout: 30s
+      retries: 5
+    networks:
+      - default
+
+  # --- Service OCR (outil de bas niveau) ---
+  ocr-service:
+    build: ./ocr_service
+    container_name: ocr-service
+    restart: always
+    networks:
+      - default
+
+  # --- Moteur OCR Alternatif : EasyOCR ---
+  easyocr-service:
+    build: ./easyocr_service
+    container_name: easyocr-service
+    restart: always
+    networks:
+      - default
+
+  # ⬇️ --- ARCHITECTURE MISE À JOUR POUR LES TÂCHES DE FOND ROBUSTES --- ⬇️
+
+  # Service Redis pour la file d'attente des tâches
+  redis:
+    image: "redis:alpine"
+    container_name: redis
+    restart: always
+    networks:
+      - default
+
+  # Le service web qui reçoit les requêtes
+  document-processor-web:
+    build: ./document_processor
+    container_name: document-processor-web
+    restart: always
+    ports:
+      - "30002:11236"
+    environment:
+      - CALLBACK_SECRET=${DOC_PROCESSOR_SECRET}
+      - N8N_TRIAGE_URL=${N8N_TRIAGE_URL}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/gcp-credentials.json
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    volumes:
+      - ./document_processor/gcp-credentials.json:/app/gcp-credentials.json:ro
+    networks:
+      - default
+    depends_on:
+      - ocr-service
+      - redis
+
+  # Le worker Celery qui exécute les tâches de fond
+  document-processor-worker:
+    build: ./document_processor
+    container_name: document-processor-worker
+    restart: always
+    command: celery -A tasks.celery_app worker --loglevel=info
+    environment:
+      - CALLBACK_SECRET=${DOC_PROCESSOR_SECRET}
+      - N8N_TRIAGE_URL=${N8N_TRIAGE_URL}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/gcp-credentials.json
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - N8N_LLM_OCR_URL=${N8N_LLM_OCR_URL}
+      - COMPLEX_OCR_ENGINE=${COMPLEX_OCR_ENGINE}
+    volumes:
+      - ./document_processor/gcp-credentials.json:/app/gcp-credentials.json:ro
+    networks:
+      - default
+    depends_on:
+      - ocr-service
+      - easyocr-service # <-- Dépendance ajoutée pour la robustesse
+      - redis
+
+# --- Section Réseaux Restaurée ---
+networks:
+  default:
+  # edge-net:
+  #   external: true
+  #   name: edge-net

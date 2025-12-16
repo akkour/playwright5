@@ -1,0 +1,142 @@
+services:
+  # =====================================
+  # ADMIN DASHBOARD
+  # =====================================
+  admin-dashboard:
+    build: ./admin_dashboard
+    container_name: admin-dashboard
+    ports:
+      - "30003:8080"
+    restart: always
+    environment:
+      - ADMIN_USER=${DASHBOARD_ADMIN_USER}
+      - ADMIN_PASS=${DASHBOARD_ADMIN_PASS}
+      - PROJECT_DIR=/workspace
+      - RESEND_API_KEY=${RESEND_API_KEY}    
+      - ALERT_EMAIL_FROM=${ALERT_EMAIL_FROM}
+      - ALERT_EMAIL_TO=${ALERT_EMAIL_TO}
+      - ALERT_COOLDOWN=${ALERT_COOLDOWN} 
+      - SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5rYnpucGNpYXlsdHFqcmFxa3JiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU1ODEzMDMsImV4cCI6MjA4MTE1NzMwM30.D6pPM2Pyx-B1Lhf3UkZ8dnuFHUxHCsvMLmLMT9d0Jtc
+      - PLAYWRIGHT_CALLBACK_SECRET=crawler_worker_7f3fca91f20e4f7c8b7c9e5f1f3a2e89
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./:/workspace:ro
+    networks:
+      - default
+
+  # =====================================
+  # PLAYWRIGHT CRAWLER
+  # =====================================
+  playwright-crawler:
+    build: .
+    container_name: playwright-crawler
+    ports:
+      - "30001:11235"
+    restart: always
+    shm_size: '2gb'
+    environment:
+      - WORKER_PORT=11235
+      - WORKER_BASE_PATH=/crawl4ai
+      - CRAWLER_WORKER_SECRET=${CRAWLER_WORKER_SECRET}
+      - CORS_ALLOW_ORIGINS=*
+      - LOG_LEVEL=info
+      - PYTHONUNBUFFERED=1
+      - UVICORN_WORKERS=2
+      - UVICORN_TIMEOUT_KEEP_ALIVE=75
+      - UVICORN_LIMIT_MAX_REQUESTS=1000
+      - SUPABASE_JOB_STATUS_URL=https://xmxwknqmuicygjnyipws.supabase.co/functions/v1/rpa-job-status
+      - ENABLE_DOCKER_COMMANDS=true                        # AJOUT 1
+      - SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5rYnpucGNpYXlsdHFqcmFxa3JiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU1ODEzMDMsImV4cCI6MjA4MTE1NzMwM30.D6pPM2Pyx-B1Lhf3UkZ8dnuFHUxHCsvMLmLMT9d0Jtc
+      - PLAYWRIGHT_CALLBACK_SECRET=crawler_worker_7f3fca91f20e4f7c8b7c9e5f1f3a2e89
+
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - /var/run/docker.sock:/var/run/docker.sock:ro       # AJOUT 2
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:11235/crawl4ai/health"]
+      interval: 30s
+      timeout: 30s
+      retries: 5
+    networks:
+      - default
+
+  # =====================================
+  # OCR SERVICE
+  # =====================================
+  ocr-service:
+    build: ./ocr_service
+    container_name: ocr-service
+    restart: always
+    networks:
+      - default
+
+  # =====================================
+  # EASYOCR SERVICE
+  # =====================================
+  easyocr-service:
+    build: ./easyocr_service
+    container_name: easyocr-service
+    restart: always
+    networks:
+      - default
+
+  # =====================================
+  # REDIS
+  # =====================================
+  redis:
+    image: "redis:alpine"
+    container_name: redis
+    restart: always
+    networks:
+      - default
+
+  # =====================================
+  # DOCUMENT PROCESSOR WEB
+  # =====================================
+  document-processor-web:
+    build: ./document_processor
+    container_name: document-processor-web
+    restart: always
+    ports:
+      - "30002:11236"
+    environment:
+      - CALLBACK_SECRET=${DOC_PROCESSOR_SECRET}
+      - N8N_TRIAGE_URL=${N8N_TRIAGE_URL}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/gcp-credentials.json
+      - CELERY_BROKER_URL=redis://redis:6379/0
+    volumes:
+      - ./document_processor/gcp-credentials.json:/app/gcp-credentials.json:ro
+    networks:
+      - default
+    depends_on:
+      - ocr-service
+      - redis
+
+  # =====================================
+  # DOCUMENT PROCESSOR WORKER
+  # =====================================
+  document-processor-worker:
+    build: ./document_processor
+    container_name: document-processor-worker
+    restart: always
+    command: celery -A tasks.celery_app worker --loglevel=info
+    environment:
+      - CALLBACK_SECRET=${DOC_PROCESSOR_SECRET}
+      - N8N_TRIAGE_URL=${N8N_TRIAGE_URL}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/gcp-credentials.json
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - N8N_LLM_OCR_URL=${N8N_LLM_OCR_URL}
+      - COMPLEX_OCR_ENGINE=${COMPLEX_OCR_ENGINE}
+    volumes:
+      - ./document_processor/gcp-credentials.json:/app/gcp-credentials.json:ro
+    networks:
+      - default
+    depends_on:
+      - ocr-service
+      - easyocr-service
+      - redis
+
+networks:
+  default:
+

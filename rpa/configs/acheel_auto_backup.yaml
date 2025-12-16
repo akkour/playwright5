@@ -1,0 +1,252 @@
+insurer_name: "Acheel"
+base_url: "https://www.acheel.com"
+country: "FR"
+complexity: 4
+rating: 4.0
+
+browser:
+  headless: true
+  timeout: 90000
+  viewport:
+    width: 1280
+    height: 800
+
+retry:
+  max_retries: 2
+  retry_delay: 1500
+
+workflows:
+  habitation:
+  # auto:
+    steps:
+      - action: navigate
+        url: "https://www.acheel.com/subscribe/auto"
+        wait_after: 1500
+
+      - action: accept_cookies
+        provider: 'didomi'
+        timeout: 3000
+        wait_after: 300
+
+      - action: execute_js
+        script: |
+          (async () => {
+            const input = document.querySelector('input');
+            if (input) {
+              input.focus();
+              const nativeSet = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+              nativeSet.call(input, 'EW137XR');
+              input.dispatchEvent(new Event('input', { bubbles: true }));
+              input.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            await new Promise(r => setTimeout(r, 500));
+            const rechercherBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().toUpperCase() === 'RECHERCHER' && b.offsetWidth > 0);
+            if (rechercherBtn) rechercherBtn.click();
+            for (let i = 0; i < 50; i++) {
+              await new Promise(r => setTimeout(r, 200));
+              const nonBtn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim().toUpperCase() === 'NON' && b.offsetWidth > 0);
+              if (nonBtn) { nonBtn.click(); return; }
+            }
+          })();
+        wait_after: 2000
+
+      - action: execute_js
+        script: |
+          (async () => {
+            for (let i = 0; i < 20; i++) {
+              const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.toUpperCase().includes('JE CONTINUE') && !b.disabled && b.offsetWidth > 0);
+              if (btn) { btn.click(); return; }
+              await new Promise(r => setTimeout(r, 200));
+            }
+          })();
+        wait_after: 1500
+
+      - action: execute_js
+        script: |
+          (async () => {
+            for (let i = 0; i < 20; i++) {
+              const btns = Array.from(document.querySelectorAll('button')).filter(b => 
+                b.offsetWidth > 0 && (b.textContent.includes('DCI') || b.textContent.includes('STYLE') || b.textContent.includes('DISTINCTION'))
+              );
+              if (btns.length > 0) { btns[0].click(); return; }
+              await new Promise(r => setTimeout(r, 200));
+            }
+          })();
+        wait_after: 1500
+
+      - action: execute_js
+        script: |
+          (async () => {
+            for (let i = 0; i < 15; i++) {
+              const opt = document.querySelector('div.gap-5 > div:nth-of-type(1)');
+              if (opt && opt.offsetWidth > 0) { opt.click(); return; }
+              await new Promise(r => setTimeout(r, 200));
+            }
+          })();
+        wait_after: 800
+
+      - action: click
+        selector: "input"
+        timeout: 10000
+        wait_after: 300
+
+      - action: type
+        selector: "input"
+        text: "03/10/2022"
+        delay: 50
+        wait_after: 500
+
+      - action: execute_js
+        script: |
+          (async () => {
+            await new Promise(r => setTimeout(r, 300));
+            const btn = Array.from(document.querySelectorAll('button')).find(b => b.offsetWidth > 0 && !b.disabled);
+            if (btn) btn.click();
+          })();
+        wait_after: 1000
+
+      - action: execute_js
+        script: |
+          (async () => {
+            for (let i = 0; i < 12; i++) {
+              await new Promise(r => setTimeout(r, 500));
+              const opt = document.querySelector('div.gap-5 > div:nth-of-type(2)') || document.querySelector('div.gap-5 > div:nth-of-type(1)');
+              if (opt) opt.click();
+              const btns = Array.from(document.querySelectorAll('button')).filter(b => b.offsetWidth > 0 && !b.disabled);
+              if (btns.length > 0) btns[btns.length > 1 ? 1 : 0].click();
+            }
+          })();
+        wait_after: 1000
+
+      - action: screenshot
+        force: true
+
+      - action: click
+        selector: "input"
+        timeout: 10000
+        wait_after: 300
+
+      - action: type
+        selector: "input"
+        text: "05/05/1966"
+        delay: 50
+        wait_after: 500
+
+      - action: execute_js
+        script: |
+          (async () => {
+            await new Promise(r => setTimeout(r, 300));
+            const btn = Array.from(document.querySelectorAll('button')).find(b => b.offsetWidth > 0 && !b.disabled);
+            if (btn) btn.click();
+          })();
+        wait_after: 800
+
+      - action: execute_js
+        script: |
+          (async () => {
+            for (let i = 0; i < 8; i++) {
+              await new Promise(r => setTimeout(r, 400));
+              const opt = document.querySelector('div.gap-5 > div:nth-of-type(1)');
+              if (opt) opt.click();
+              const btns = Array.from(document.querySelectorAll('button')).filter(b => b.offsetWidth > 0);
+              if (btns.length > 1) btns[1].click();
+            }
+          })();
+        wait_after: 600
+
+      - action: click
+        selector: "input"
+        timeout: 10000
+        wait_after: 300
+
+      - action: type
+        selector: "input"
+        text: "03/05/1992"
+        delay: 50
+        wait_after: 500
+
+      - action: execute_js
+        script: |
+          (async () => {
+            await new Promise(r => setTimeout(r, 300));
+            const btn = Array.from(document.querySelectorAll('button')).find(b => b.offsetWidth > 0 && !b.disabled);
+            if (btn) btn.click();
+          })();
+        wait_after: 800
+
+      - action: execute_js
+        script: |
+          (async () => {
+            for (let n = 0; n < 5; n++) {
+              await new Promise(r => setTimeout(r, 300));
+              const btns = Array.from(document.querySelectorAll('button')).filter(b => b.offsetWidth > 0);
+              if (btns.length > 1) btns[1].click();
+            }
+          })();
+        wait_after: 600
+
+      - action: execute_js
+        script: |
+          (async () => {
+            const ns = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            const inputs = Array.from(document.querySelectorAll('input')).filter(i => i.offsetWidth > 0);
+            if (inputs[0]) { ns.call(inputs[0], 'Jean'); inputs[0].dispatchEvent(new Event('input', { bubbles: true })); }
+            if (inputs[1]) { ns.call(inputs[1], 'Dupont'); inputs[1].dispatchEvent(new Event('input', { bubbles: true })); }
+            if (inputs[2]) { ns.call(inputs[2], 'test@acheel-rpa.fr'); inputs[2].dispatchEvent(new Event('input', { bubbles: true })); }
+            if (inputs[3]) { ns.call(inputs[3], '0612345678'); inputs[3].dispatchEvent(new Event('input', { bubbles: true })); }
+          })();
+        wait_after: 500
+
+      - action: execute_js
+        script: |
+          (async () => {
+            document.querySelectorAll('input[type="checkbox"]').forEach(cb => { if (!cb.checked) cb.click(); });
+            await new Promise(r => setTimeout(r, 300));
+            for (let i = 0; i < 15; i++) {
+              const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.toUpperCase().includes('COUVRIR') && !b.disabled && b.offsetWidth > 0);
+              if (btn) { btn.click(); return; }
+              await new Promise(r => setTimeout(r, 200));
+            }
+          })();
+        wait_after: 5000
+
+      - action: execute_js
+        script: |
+          (async () => {
+            for (let i = 0; i < 30; i++) {
+              if (document.body.innerText.includes('/mois')) break;
+              await new Promise(r => setTimeout(r, 300));
+            }
+            const prices = [];
+            const re = /(\d+[,\.]\d{2})\s*€/g;
+            let m;
+            while ((m = re.exec(document.body.innerText)) !== null) {
+              const v = parseFloat(m[1].replace(',', '.'));
+              if (v >= 10 && v <= 500 && !prices.includes(v)) prices.push(v);
+            }
+            prices.sort((a, b) => a - b);
+            const el = (id, val) => {
+              let e = document.getElementById(id);
+              if (!e) { e = document.createElement('div'); e.id = id; document.body.appendChild(e); }
+              e.style.cssText = 'position:fixed;left:-9999px;';
+              e.textContent = val;
+            };
+            el('__rpa_price_monthly__', prices[0] || '0');
+            el('__rpa_formula_name__', 'Tiers');
+            el('__rpa_all_formulas__', JSON.stringify(prices.slice(0,3).map((p,i) => ({name:['Tiers','Tiers+','Tous Risques'][i],price:p}))));
+            el('__rpa_currency__', 'EUR');
+          })();
+        wait_after: 300
+
+      - action: screenshot
+        force: true
+
+      - action: extract
+        fields:
+          price_monthly: "#__rpa_price_monthly__"
+          formula_name: "#__rpa_formula_name__"
+          all_formulas: "#__rpa_all_formulas__"
+          currency: "#__rpa_currency__"
+
+test_data:
+  license_plate: "EW137XR"

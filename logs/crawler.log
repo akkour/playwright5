@@ -1,0 +1,14 @@
+2025-08-28 22:01:43,464 - evarag_crawler - WARNING - ⚠️ Redis not available: Error 111 connecting to localhost:6379. Connection refused.
+2025-08-28 22:01:43,464 - evarag_crawler - WARNING - ⚠️ Redis not available: Error 111 connecting to localhost:6379. Connection refused.
+2025-08-28 22:01:43,464 - evarag_crawler - INFO - 🚀 EvaRAG Crawler Service 3.2.0 started
+2025-08-28 22:01:43,464 - evarag_crawler - INFO - 🚀 EvaRAG Crawler Service 3.2.0 started
+2025-08-28 22:01:43,464 - evarag_crawler - INFO - 📊 Monitoring at /monitor   |  📈 Metrics at /metrics
+2025-08-28 22:01:43,464 - evarag_crawler - INFO - 📊 Monitoring at /monitor   |  📈 Metrics at /metrics
+2025-08-28 22:01:43,465 - evarag_crawler - INFO - ✨ v3.2 Improvements: False
+2025-08-28 22:01:43,465 - evarag_crawler - INFO - ✨ v3.2 Improvements: False
+2025-08-28 22:01:43,465 - evarag_crawler - INFO - 🕒 Adaptive Timeouts: True
+2025-08-28 22:01:43,465 - evarag_crawler - INFO - 🕒 Adaptive Timeouts: True
+2025-08-28 22:01:43,465 - evarag_crawler - INFO - 📝 Advanced Logging: True
+2025-08-28 22:01:43,465 - evarag_crawler - INFO - 📝 Advanced Logging: True
+2025-08-28 23:55:14,670 - evarag_crawler - INFO - 👋 Crawler Service stopped
+2025-08-28 23:55:14,870 - evarag_crawler - INFO - 👋 Crawler Service stopped
