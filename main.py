@@ -1,6 +1,13 @@
 """
-EvaRAG Enhanced Crawler Service v3.16.1 - RPA Quote Integration + Job Status Notifications + Docker Execute Command
+EvaRAG Enhanced Crawler Service v3.17.0 - P0 Security & Stability Fixes
 Service de crawling avec Playwright — version complète, ZÉRO régression.
+
+✅ CORRECTIONS P0 v3.17.0:
+- Fix fuite browser: try/finally sur crawl_sync() et crawl_async_worker() — le browser est toujours fermé
+- Sémaphore de concurrence: limite le nombre de browsers Chromium simultanés (MAX_CONCURRENT_BROWSERS)
+- Args Chromium sécurisés: --no-sandbox, --disable-dev-shm-usage, --disable-gpu (compatibilité Fly.io/Docker)
+- Secrets retirés du code source: plus de mot de passe/URL/clé par défaut en dur
+- Secrets retirés de docker-compose.yml: utilisation de variables d'environnement ${...}
 
 ✅ CORRECTIONS v3.16.1:
 - Fixed duration_ms type: convertir float en int pour Pydantic (RPAQuoteResponse exige un entier)
@@ -116,16 +123,13 @@ except ImportError as e:
 # =========================
 
 APP_NAME = "EvaRAG Crawler Service"
-APP_VERSION = "3.16.1"
+APP_VERSION = "3.17.0"
 
 CRAWLER_WORKER_SECRET = os.getenv("CRAWLER_WORKER_SECRET", "")
 DEFAULT_CALLBACK_URL = os.getenv("CRAWLER_CALLBACK_URL", "")
 
 # Supabase Edge Function URL for job status notifications
-SUPABASE_JOB_STATUS_URL = os.getenv(
-    "SUPABASE_JOB_STATUS_URL", 
-    "https://xmxwknqmuicygjnyipws.supabase.co/functions/v1/rpa-job-status"
-)
+SUPABASE_JOB_STATUS_URL = os.getenv("SUPABASE_JOB_STATUS_URL", "")
 SUPABASE_CALLBACK_SECRET = os.getenv("SUPABASE_CALLBACK_SECRET", "")
 
 # Docker Command Execution Configuration (v3.16.0)
@@ -140,6 +144,7 @@ class Config:
     STATIC_TIMEOUT = 30.0
     MAX_LINKS_RETURNED = 50
     MAX_CONCURRENT_PAGES = 3
+    MAX_CONCURRENT_BROWSERS = int(os.getenv("MAX_CONCURRENT_BROWSERS", 2))
     MAX_RETRIES = 3
     CACHE_TTL = 3600
     MONITORING_INTERVAL = 5
@@ -149,13 +154,16 @@ class Config:
     BFS_SEEN_MULTIPLIER = 5.0
     CALLBACK_TIMEOUT = 30
     CALLBACK_RETRY_COUNT = 3
+    BROWSER_ARGS = ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
 
 # =========================
 # Authentification
 # =========================
 security = HTTPBasic()
-BASIC_AUTH_USER = os.getenv("BASIC_AUTH_USER", "admin")
-BASIC_AUTH_PASS = os.getenv("BASIC_AUTH_PASS", "Hg.54.uyt.$$!!.xcv")
+BASIC_AUTH_USER = os.getenv("BASIC_AUTH_USER", "")
+BASIC_AUTH_PASS = os.getenv("BASIC_AUTH_PASS", "")
+if not BASIC_AUTH_USER or not BASIC_AUTH_PASS:
+    logger.warning("⚠️ BASIC_AUTH_USER / BASIC_AUTH_PASS non configurés — définir via variables d'environnement")
 
 def verify_basic_auth(credentials: HTTPBasicCredentials = Depends(security)):
     correct_username = secrets.compare_digest(credentials.username, BASIC_AUTH_USER)
@@ -569,6 +577,10 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 job_manager = JobManager()
 callback_manager = CallbackManager()
 
+# Sémaphore pour limiter le nombre de browsers Chromium concurrents (protection mémoire/SHM)
+browser_semaphore = asyncio.Semaphore(Config.MAX_CONCURRENT_BROWSERS)
+logger.info(f"🔒 Browser concurrency limit: {Config.MAX_CONCURRENT_BROWSERS}")
+
 # RPA Config Manager
 if RPA_MODULE_LOADED:
     rpa_config = config_manager
@@ -693,31 +705,34 @@ async def crawl_sync(request: CrawlRequest) -> CrawlResponse:
             except httpx.RequestError as e:
                 logger.warning(f"Could not check for initial redirect: {e}")
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(
-                user_agent=random.choice(USER_AGENTS),
-                extra_http_headers={"Accept-Language": "en-US,en;q=0.9,fr;q=0.8"}
-            )
-            page = await context.new_page()
-            to_visit = deque([(start_url, 0)])
-            visited = {start_url}
-            base_domain = extract_domain(start_url)
-            while to_visit and len(results) < request.max_pages:
-                url, depth = to_visit.popleft()
-                if depth > request.max_depth: continue
-                result = await crawl_page(page, url, depth)
-                if result:
-                    results.append(result)
-                    if depth < request.max_depth:
-                        for link in result.links:
-                            if link not in visited and should_crawl_url(link, base_domain, request.include_patterns, request.exclude_patterns):
-                                visited.add(link)
-                                to_visit.append((link, depth + 1))
-                else:
-                    errors.append(f"Failed to crawl: {url}")
-                await asyncio.sleep(random.uniform(0.5, 1.5))
-            await browser.close()
+        async with browser_semaphore:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True, args=Config.BROWSER_ARGS)
+                try:
+                    context = await browser.new_context(
+                        user_agent=random.choice(USER_AGENTS),
+                        extra_http_headers={"Accept-Language": "en-US,en;q=0.9,fr;q=0.8"}
+                    )
+                    page = await context.new_page()
+                    to_visit = deque([(start_url, 0)])
+                    visited = {start_url}
+                    base_domain = extract_domain(start_url)
+                    while to_visit and len(results) < request.max_pages:
+                        url, depth = to_visit.popleft()
+                        if depth > request.max_depth: continue
+                        result = await crawl_page(page, url, depth)
+                        if result:
+                            results.append(result)
+                            if depth < request.max_depth:
+                                for link in result.links:
+                                    if link not in visited and should_crawl_url(link, base_domain, request.include_patterns, request.exclude_patterns):
+                                        visited.add(link)
+                                        to_visit.append((link, depth + 1))
+                        else:
+                            errors.append(f"Failed to crawl: {url}")
+                        await asyncio.sleep(random.uniform(0.5, 1.5))
+                finally:
+                    await browser.close()
     except Exception as e:
         logger.error(f"💥 Crawling error: {str(e)}")
         errors.append(str(e))
@@ -755,45 +770,48 @@ async def crawl_async_worker(job_id: str, job_data: CrawlJobRequest):
             except httpx.RequestError as e:
                 logger.warning(f"Could not check for initial redirect: {e}")
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
-            page = await context.new_page()
-            to_visit = deque([(start_url, 0)])
-            visited = {start_url}
-            await callback_manager.send_callback(str(job_data.callback_url), 'pages_found', {'total': job_data.max_pages}, job_id)
-            while to_visit and len(results) < job_data.max_pages:
-                url, depth = to_visit.popleft()
-                if depth > job_data.depth: continue
-                pages_attempted += 1
-                result = await crawl_page(page, url, depth)
-                if result:
-                    results.append(result)
-                    content_hash = hashlib.sha256(result.textContent.encode()).hexdigest()
-                    if content_hash not in content_hashes_seen:
-                        content_hashes_seen.add(content_hash)
-                        documents_created_count += 1
-                        normalized_url = normalize_url(result.url)
-                        source_id_hash = hashlib.sha256(normalized_url.encode()).hexdigest()
-                        logger.info(f"📄 [{job_id}] New unique content found, sending document: {url}")
-                        doc_data = {
-                            'title': result.title, 'content': result.textContent, 'source_id': f"{job_data.site_id}_{source_id_hash}",
-                            'metadata': { 'url': normalized_url, 'description': result.description, 'word_count': result.wordCount,
-                                        'crawled_at': result.crawled_at, 'depth': result.depth, 'language': result.language },
-                            'site_id': job_data.site_id, 'organization_id': job_data.organization_id
-                        }
-                        await callback_manager.send_callback(str(job_data.callback_url), 'document_created', {'doc': doc_data}, job_id)
-                    if depth < job_data.depth:
-                        for link in result.links:
-                            if link not in visited and should_crawl_url(link, base_domain, include_patterns, exclude_patterns):
-                                visited.add(link)
-                                to_visit.append((link, depth + 1))
-                else:
-                    errors.append(f"Failed to crawl: {url}")
-                await callback_manager.send_callback(str(job_data.callback_url), 'progress', 
-                    {'pages_crawled': pages_attempted, 'documents_created': documents_created_count}, job_id)
-                await asyncio.sleep(random.uniform(0.5, 1.5))
-            await browser.close()
+        async with browser_semaphore:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True, args=Config.BROWSER_ARGS)
+                try:
+                    context = await browser.new_context(user_agent=random.choice(USER_AGENTS))
+                    page = await context.new_page()
+                    to_visit = deque([(start_url, 0)])
+                    visited = {start_url}
+                    await callback_manager.send_callback(str(job_data.callback_url), 'pages_found', {'total': job_data.max_pages}, job_id)
+                    while to_visit and len(results) < job_data.max_pages:
+                        url, depth = to_visit.popleft()
+                        if depth > job_data.depth: continue
+                        pages_attempted += 1
+                        result = await crawl_page(page, url, depth)
+                        if result:
+                            results.append(result)
+                            content_hash = hashlib.sha256(result.textContent.encode()).hexdigest()
+                            if content_hash not in content_hashes_seen:
+                                content_hashes_seen.add(content_hash)
+                                documents_created_count += 1
+                                normalized_url = normalize_url(result.url)
+                                source_id_hash = hashlib.sha256(normalized_url.encode()).hexdigest()
+                                logger.info(f"📄 [{job_id}] New unique content found, sending document: {url}")
+                                doc_data = {
+                                    'title': result.title, 'content': result.textContent, 'source_id': f"{job_data.site_id}_{source_id_hash}",
+                                    'metadata': { 'url': normalized_url, 'description': result.description, 'word_count': result.wordCount,
+                                                'crawled_at': result.crawled_at, 'depth': result.depth, 'language': result.language },
+                                    'site_id': job_data.site_id, 'organization_id': job_data.organization_id
+                                }
+                                await callback_manager.send_callback(str(job_data.callback_url), 'document_created', {'doc': doc_data}, job_id)
+                            if depth < job_data.depth:
+                                for link in result.links:
+                                    if link not in visited and should_crawl_url(link, base_domain, include_patterns, exclude_patterns):
+                                        visited.add(link)
+                                        to_visit.append((link, depth + 1))
+                        else:
+                            errors.append(f"Failed to crawl: {url}")
+                        await callback_manager.send_callback(str(job_data.callback_url), 'progress',
+                            {'pages_crawled': pages_attempted, 'documents_created': documents_created_count}, job_id)
+                        await asyncio.sleep(random.uniform(0.5, 1.5))
+                finally:
+                    await browser.close()
         duration = time.time() - start_time
         summary = { "total_pages": len(results), "documents_created": documents_created_count,
                     "total_errors": len(errors), "duration_seconds": round(duration, 2) }
