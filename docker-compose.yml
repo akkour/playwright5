@@ -16,8 +16,8 @@ services:
       - ALERT_EMAIL_FROM=${ALERT_EMAIL_FROM}
       - ALERT_EMAIL_TO=${ALERT_EMAIL_TO}
       - ALERT_COOLDOWN=${ALERT_COOLDOWN} 
-      - SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5rYnpucGNpYXlsdHFqcmFxa3JiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU1ODEzMDMsImV4cCI6MjA4MTE1NzMwM30.D6pPM2Pyx-B1Lhf3UkZ8dnuFHUxHCsvMLmLMT9d0Jtc
-      - PLAYWRIGHT_CALLBACK_SECRET=crawler_worker_7f3fca91f20e4f7c8b7c9e5f1f3a2e89
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - PLAYWRIGHT_CALLBACK_SECRET=${PLAYWRIGHT_CALLBACK_SECRET}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./:/workspace:ro
@@ -46,8 +46,8 @@ services:
       - UVICORN_LIMIT_MAX_REQUESTS=1000
       - SUPABASE_JOB_STATUS_URL=https://xmxwknqmuicygjnyipws.supabase.co/functions/v1/rpa-job-status
       - ENABLE_DOCKER_COMMANDS=true                        # AJOUT 1
-      - SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5rYnpucGNpYXlsdHFqcmFxa3JiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjU1ODEzMDMsImV4cCI6MjA4MTE1NzMwM30.D6pPM2Pyx-B1Lhf3UkZ8dnuFHUxHCsvMLmLMT9d0Jtc
-      - PLAYWRIGHT_CALLBACK_SECRET=crawler_worker_7f3fca91f20e4f7c8b7c9e5f1f3a2e89
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - PLAYWRIGHT_CALLBACK_SECRET=${PLAYWRIGHT_CALLBACK_SECRET}
 
     volumes:
       - ./data:/app/data
